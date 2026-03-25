@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Water Delivery Calculator</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="calc-container">
+    <header>
+        <h1>💧 Water Delivery Calculator</h1>
+        <p>Paste your raw daily notes below to auto-calculate totals.</p>
+    </header>
+
+    <div class="input-section">
+        <textarea id="raw-log" rows="12" placeholder="Paste your raw notes here... Example:
+Expenses - 1430
+100 breakfast
+
+34R (1st trip)
+1 return
+25x34"></textarea>
+        <div class="actions">
+            <button id="calc-btn" class="btn primary">Calculate Totals</button>
+            <button id="clear-btn" class="btn secondary">Clear</button>
+        </div>
+    </div>
+
+    <!-- Results Dashboard (Hidden by default) -->
+    <div id="results-dashboard" class="hidden">
+        <div class="dashboard-header">
+            <h2 id="display-date">Summary</h2>
+            <button id="export-btn" class="btn small">📋 Copy Summary</button>
+        </div>
+
+        <div class="summary-cards">
+            <div class="card">
+                <h3>Total Revenue</h3>
+                <p id="out-revenue" class="text-blue">₱0</p>
+                <small id="out-gallons">0 gallons sold</small>
+            </div>
+            <div class="card">
+                <h3>Expenses</h3>
+                <p id="out-expenses" class="text-red">₱0</p>
+                <small id="warn-expenses" class="warning hidden">Stated: ₱<span></span></small>
+            </div>
+            <div class="card">
+                <h3>Credits Paid</h3>
+                <p id="out-credits-paid" class="text-green">₱0</p>
+            </div>
+            <div class="card highlight">
+                <h3>Net Cash Flow</h3>
+                <p id="out-net" class="text-bold">₱0</p>
+                <small>Rev + Credits Paid - Credits Today - Exp</small>
+            </div>
+        </div>
+
+        <div class="details-section">
+            <div class="detail-col">
+                <h3>🧾 Trip Breakdown</h3>
+                <ul id="trip-list" class="clean-list"></ul>
+            </div>
+            <div class="detail-col">
+                <h3>📝 Credits Overview</h3>
+                <ul class="clean-list">
+                    <li><strong>Credits Today:</strong> ₱<span id="out-credits-today">0</span></li>
+                    <li><strong>Remaining Credits:</strong> ₱<span id="out-rem-credits">0</span></li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
