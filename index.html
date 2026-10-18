@@ -2,9 +2,21 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Water Delivery Manager</title>
+    <meta name="description" content="Trip log, utang ledger and expenses for a water delivery run. Works offline.">
+
     <link rel="stylesheet" href="style.css">
+
+    <!-- Installable app -->
+    <link rel="manifest" href="manifest.webmanifest">
+    <meta name="theme-color" content="#0275d8">
+    <link rel="icon" href="icons/favicon-64.png" sizes="64x64" type="image/png">
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Water Calc">
+    <meta name="mobile-web-app-capable" content="yes">
 </head>
 <body>
 
@@ -149,6 +161,28 @@ September 12, 2026 (Saturday)
 
             <div id="written-total-note" class="notice hidden"></div>
 
+            <!-- Who owes what after this sheet -->
+            <div class="details-section hidden" id="balances-wrap">
+                <div class="detail-col wide">
+                    <h3>💰 Utang After This Sheet</h3>
+                    <div class="table-scroll">
+                        <table class="table" id="balances-table">
+                            <thead>
+                                <tr><th>Customer</th>
+                                    <th class="num">Remaining Last</th>
+                                    <th class="num">+ New Utang</th>
+                                    <th class="num">− Paid</th>
+                                    <th class="num">Owes Now</th></tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                    <p class="muted" id="balances-note">Remaining Last is what you wrote under
+                        <code>Remaining</code> (what they already owed). <code>Credits today</code> adds to it,
+                        <code>Credits paid</code> takes away.</p>
+                </div>
+            </div>
+
             <div class="details-section">
                 <div class="detail-col">
                     <h3>🧾 Trips</h3>
@@ -277,23 +311,31 @@ September 12, 2026 (Saturday)
         <div class="summary-cards" id="ledger-cards"></div>
 
         <div id="missing-box" class="notice warn hidden">
-            <strong>❓ These people were on your last Remaining list but not on the newest one</strong>
-            <div class="muted">They either paid up, or you forgot to carry them over.</div>
+            <strong>❓ These people were on your last Remaining list but are not on the newest one</strong>
+            <div class="muted">They either paid up, or you forgot to carry them over. Add them back under
+                <code>Remaining</code> if they still owe you.</div>
             <ul id="missing-list"></ul>
         </div>
 
         <div id="rollforward-box2" class="notice warn hidden">
-            <strong>⚠️ These balances did not roll forward correctly</strong>
-            <div class="muted">Previous balance + new utang − collected should equal the new balance.</div>
+            <strong>⚠️ These balances were carried in at a different amount than last time</strong>
+            <div class="muted">You ended at one number, then started the next list at another.</div>
             <ul id="rollforward-list2"></ul>
+        </div>
+
+        <div id="lookalike-box" class="notice info hidden">
+            <strong>🔎 These might be the same customer written two ways</strong>
+            <div class="muted">Names like <code>aling nena</code> are fine - merge only if it is really
+                the same person.</div>
+            <ul id="lookalike-list"></ul>
         </div>
 
         <div class="table-scroll">
             <table class="table clickable" id="customers-table">
                 <thead>
                     <tr><th>Customer</th><th class="num">Owes Now</th>
-                    <th class="num">Utang Given (all time)</th><th class="num">Paid Back (all time)</th>
-                    <th>Balance As Of</th></tr>
+                    <th class="num">Remaining Last</th><th class="num">+ New</th>
+                    <th class="num">− Paid</th><th>As Of</th></tr>
                 </thead>
                 <tbody></tbody>
             </table>
@@ -431,6 +473,7 @@ September 12, 2026 (Saturday)
         <div class="modal-body" id="modal-body"></div>
         <div class="modal-foot">
             <button id="modal-quickpay" class="btn success small">💰 Record payment</button>
+            <button id="modal-rename" class="btn small">✏️ Rename / merge</button>
             <button id="modal-close-2" class="btn secondary small">Close</button>
         </div>
     </div>
@@ -452,8 +495,30 @@ September 12, 2026 (Saturday)
 
 <div id="toast" class="toast hidden"></div>
 
+<div id="offline-banner" class="offline-banner hidden">
+    📶 No signal — you are offline. Everything still saves on this phone.
+</div>
+
 <script src="parser.js"></script>
 <script src="store.js"></script>
 <script src="app.js"></script>
+
+<script>
+/* Register the service worker so the app opens with no signal.
+   Needs http(s) - it does nothing when you open the file directly. */
+(function () {
+    if (!('serviceWorker' in navigator)) return;
+    if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
+
+    window.addEventListener('load', function () {
+        navigator.serviceWorker.register('sw.js').then(function (reg) {
+            // If a newer copy is already waiting, it takes over on this load
+            if (reg.waiting) reg.waiting.postMessage({ type: 'skip-waiting' });
+        }).catch(function (err) {
+            console.warn('Offline support could not start:', err);
+        });
+    });
+})();
+</script>
 </body>
 </html>

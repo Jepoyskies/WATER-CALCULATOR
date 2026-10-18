@@ -17,6 +17,8 @@
         view: null,          // snapshot view: balances, change, borrowed...
         autoBackupHandle: null,
         device: 'unknown',
+        modalKey: null,      // customer open in the modal
+        dismissedPairs: {},  // lookalike names the user said are different people
         selected: {}         // history checkboxes
     };
 
@@ -68,8 +70,9 @@
         return true;
     }
 
-    function downloadText(filename, text, mime) {
-        var blob = new Blob(['\uFEFF' + text], { type: (mime || 'text/plain') + ';charset=utf-8' });
+    function downloadText(filename, text, mime, noBom) {
+        var body = noBom ? text : '\uFEFF' + text;
+        var blob = new Blob([body], { type: (mime || 'text/plain') + ';charset=utf-8' });
         var url = URL.createObjectURL(blob);
         var a = document.createElement('a');
         a.href = url;
@@ -80,6 +83,42 @@
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
         }, 500);
+    }
+
+    /**
+     * On a phone a plain download lands in a folder nobody can find. If the
+     * phone can share files, offer the share sheet instead so the backup can
+     * go straight to Drive, email, or a chat with yourself.
+     *
+     * Resolves with 'shared', 'downloaded' or 'cancelled'.
+     */
+    function shareOrDownload(filename, text, mime, noBom) {
+        var type = mime || 'text/plain';
+        var body = noBom ? text : '\uFEFF' + text;
+        var file;
+
+        try {
+            file = new File([body], filename, { type: type + ';charset=utf-8' });
+        } catch (err) {
+            file = null;
+        }
+
+        if (file && navigator.canShare) {
+            var shareData = { files: [file], title: filename, text: filename };
+            if (navigator.canShare(shareData)) {
+                return navigator.share(shareData).then(function () {
+                    return 'shared';
+                }).catch(function (err) {
+                    // The user closing the share sheet is not an error
+                    if (err && err.name === 'AbortError') return 'cancelled';
+                    downloadText(filename, text, type, noBom);
+                    return 'downloaded';
+                });
+            }
+        }
+
+        downloadText(filename, text, type, noBom);
+        return Promise.resolve('downloaded');
     }
 
     function csvCell(v) {
@@ -113,6 +152,10 @@
                     updateAutoBackupUI('needs a click', 'warn');
                 }
             })
+            .then(function () { return S.getMeta('dismissedPairs', null); })
+            .then(function (pairs) {
+                state.dismissedPairs = pairs && typeof pairs === 'object' ? pairs : {};
+            })
             .then(refreshAll)
             .then(function () { return S.requestPersistence(); })
             .then(function (result) {
@@ -126,6 +169,42 @@
 
         restoreDraft();
         bindEvents();
+        runShortcut();
+        watchConnection();
+    }
+
+    /** Home-screen shortcuts: ?action=newday and ?action=utang */
+    function runShortcut() {
+        var action = null;
+        try {
+            action = new URLSearchParams(location.search).get('action');
+        } catch (err) { return; }
+        if (!action) return;
+
+        // Do not leave the query string around - it makes the next reload repeat it
+        try { history.replaceState(null, '', location.pathname); } catch (err) { /* file:// */ }
+
+        if (action === 'utang') {
+            switchView('customers');
+        } else if (action === 'newday') {
+            switchView('entry');
+            startNewDay();
+        }
+    }
+
+    /** Warns when the phone loses signal mid-trip. The app keeps working. */
+    function watchConnection() {
+        var banner = $('offline-banner');
+        if (!banner) return;
+
+        function update() {
+            if (navigator.onLine) hide(banner);
+            else show(banner);
+        }
+
+        on(window, 'online', update);
+        on(window, 'offline', update);
+        update();
     }
 
     function detectDevice() {
@@ -230,6 +309,7 @@
         renderTripWarnings(parsed);
         renderUnparsed(parsed);
         renderStatedMismatch(parsed);
+        renderBalancesPanel(parsed);
         renderRollForward(parsed);
         show($('results-dashboard'));
 
@@ -328,29 +408,65 @@
         show(box);
     }
 
+    /**
+     * Shows the maths the notes ask for:
+     *   Remaining (what they already owed) + Credits today − Credits paid
+     */
+    function renderBalancesPanel(parsed) {
+        var wrap = $('balances-wrap');
+        var rows = (parsed.balances || []).filter(function (b) {
+            return b.key !== '__unassigned__';
+        });
+
+        if (!rows.length) { hide(wrap); return; }
+
+        var tbody = $('balances-table').querySelector('tbody');
+        tbody.innerHTML = '';
+
+        rows.forEach(function (b) {
+            var tr = document.createElement('tr');
+            var cls = b.total > 0 ? 'pos' : 'zero';
+            tr.innerHTML =
+                '<td>' + escapeHtml(b.name) + '</td>' +
+                '<td class="num">' + peso(b.carried) + '</td>' +
+                '<td class="num">' + (b.given ? '+' + peso(b.given) : '—') + '</td>' +
+                '<td class="num">' + (b.paid ? '−' + peso(b.paid) : '—') + '</td>' +
+                '<td class="num ' + cls + '"><strong>' + peso(b.total) + '</strong></td>';
+            tbody.appendChild(tr);
+        });
+
+        var owing = rows.filter(function (b) { return b.total > 0; });
+        var total = owing.reduce(function (a, b) { return a + b.total; }, 0);
+
+        $('balances-note').innerHTML = owing.length
+            ? '<strong>' + owing.length + '</strong> ' +
+              (owing.length === 1 ? 'person still owes' : 'people still owe') + ' you <strong>' +
+              peso(total) + '</strong>. This is what carries over when you start a new day.'
+            : 'Nobody owes you anything after this sheet 🎉';
+
+        show(wrap);
+    }
+
     function renderRollForward(parsed) {
         var box = $('rollforward-box');
         var list = $('rollforward-list');
 
         S.snapshotView().then(function (view) {
             // Only meaningful when the notes being previewed carry a Remaining list
-            if (!parsed.remainingSnapshot.length || !view.rollForward.length) {
+            if (!(parsed.balances || []).length || !view.rollForward.length) {
                 hide(box);
                 return;
             }
 
             var mine = {};
-            parsed.remainingSnapshot.forEach(function (s) { mine[s.key] = s.amount; });
+            (parsed.balances || []).forEach(function (b) { mine[b.key] = b.carried; });
 
             var rows = view.rollForward.filter(function (r) { return mine[r.key] !== undefined; });
             if (!rows.length) { hide(box); return; }
 
             list.innerHTML = rows.map(function (r) {
-                return '<li><strong>' + r.name + '</strong>: was ' + peso(r.before) +
-                    ' + new utang ' + peso(r.given) +
-                    ' − paid ' + peso(r.paid) +
-                    ' = should be ' + peso(r.expected) +
-                    ', you wrote ' + peso(r.actual) +
+                return '<li><strong>' + escapeHtml(r.name) + '</strong>: ended at ' + peso(r.endedAt) +
+                    ' on ' + P.prettyDate(r.asOf) + ', but this list starts at ' + peso(r.carried) +
                     ' (off by ' + peso(r.diff) + ')</li>';
             }).join('');
             show(box);
@@ -403,7 +519,7 @@
 
         if (!parsed.trips.length && !parsed.expenses.items.length &&
             !parsed.creditsToday.items.length && !parsed.creditsPaid.items.length &&
-            !parsed.remainingSnapshot.length) {
+            !parsed.balances.length) {
             toast('Nothing worth saving yet.', 'bad');
             return;
         }
@@ -467,6 +583,7 @@
         (parsed.remainingSnapshot || []).forEach(function (s) {
             if (s.key !== '__unassigned__') add(s.name);
         });
+        (parsed.balances || []).forEach(function (b) { add(b.name); });
         (parsed.ledger || []).forEach(function (e) { add(e.name); });
         (parsed.change && parsed.change.named ? parsed.change.named : []).forEach(function (s) {
             if (s.key !== '__unassigned__') add(s.name);
@@ -772,8 +889,8 @@
 
         var owing = rows.filter(function (b) { return b.amount > 0; });
         var outstanding = owing.reduce(function (a, b) { return a + b.amount; }, 0);
-        var lifetimeGiven = rows.reduce(function (a, b) { return a + (b.owed || 0); }, 0);
-        var lifetimePaid = rows.reduce(function (a, b) { return a + (b.paid || 0); }, 0);
+        var lifetimeGiven = rows.reduce(function (a, b) { return a + (b.owedAllTime || 0); }, 0);
+        var lifetimePaid = rows.reduce(function (a, b) { return a + (b.paidAllTime || 0); }, 0);
 
         $('ledger-cards').innerHTML = [
             card('People With Utang', String(owing.length), 'still owing', 'text-orange'),
@@ -788,23 +905,24 @@
         var missingBox = $('missing-box');
         if (view.missing.length) {
             $('missing-list').innerHTML = view.missing.map(function (m) {
-                return '<li><strong>' + escapeHtml(m.name) + '</strong> — was ' + peso(m.amount) +
+                return '<li><strong>' + escapeHtml(m.name) + '</strong> — owed ' + peso(m.amount) +
                     ' on ' + P.prettyDate(m.asOf) + '</li>';
             }).join('');
             show(missingBox);
         } else hide(missingBox);
 
-        // Roll-forward differences
+        // Balances that were carried in at a different amount than they ended at
         var rfBox = $('rollforward-box2');
         if (view.rollForward.length) {
             $('rollforward-list2').innerHTML = view.rollForward.map(function (r) {
-                return '<li><strong>' + escapeHtml(r.name) + '</strong>: was ' + peso(r.before) +
-                    ' + ' + peso(r.given) + ' new − ' + peso(r.paid) + ' collected = ' +
-                    peso(r.expected) + ', but the new list says ' + peso(r.actual) +
+                return '<li><strong>' + escapeHtml(r.name) + '</strong>: ended at ' + peso(r.endedAt) +
+                    ' on ' + P.prettyDate(r.asOf) + ', next list started at ' + peso(r.carried) +
                     ' (off by ' + peso(r.diff) + ')</li>';
             }).join('');
             show(rfBox);
         } else hide(rfBox);
+
+        renderLookalikes(rows);
 
         var tbody = $('customers-table').querySelector('tbody');
         tbody.innerHTML = '';
@@ -814,9 +932,10 @@
             var cls = row.amount > 0 ? 'pos' : 'zero';
             tr.innerHTML =
                 '<td>' + escapeHtml(row.name) + '</td>' +
-                '<td class="num ' + cls + '">' + peso(row.amount) + '</td>' +
-                '<td class="num">' + peso(row.owed || 0) + '</td>' +
-                '<td class="num">' + peso(row.paid || 0) + '</td>' +
+                '<td class="num ' + cls + '"><strong>' + peso(row.amount) + '</strong></td>' +
+                '<td class="num">' + peso(row.carriedLast || 0) + '</td>' +
+                '<td class="num">' + (row.newUtang ? '+' + peso(row.newUtang) : '—') + '</td>' +
+                '<td class="num">' + (row.collected ? '−' + peso(row.collected) : '—') + '</td>' +
                 '<td>' + (row.asOf ? P.prettyDate(row.asOf) : '—') + '</td>';
             tr.addEventListener('click', function () { openCustomerModal(row.key); });
             tbody.appendChild(tr);
@@ -826,11 +945,82 @@
         else show($('ledger-empty'));
     }
 
+    /** Offers a merge when two names look like the same person. Never merges by itself. */
+    function renderLookalikes(rows) {
+        var box = $('lookalike-box');
+        var list = $('lookalike-list');
+
+        var dismissed = state.dismissedPairs || {};
+        var pairs = P.findLookalikes(rows).filter(function (p) {
+            return !dismissed[pairKey(p.a.key, p.b.key)];
+        });
+
+        if (!pairs.length) { hide(box); return; }
+
+        list.innerHTML = '';
+
+        pairs.forEach(function (p) {
+            var li = document.createElement('li');
+            li.innerHTML = '<strong>' + escapeHtml(p.a.name) + '</strong> (' + peso(p.a.amount) + ')  ' +
+                'vs <strong>' + escapeHtml(p.b.name) + '</strong> (' + peso(p.b.amount) + ') — ' +
+                p.reason + ' ';
+
+            var mergeBtn = document.createElement('button');
+            mergeBtn.className = 'btn small';
+            mergeBtn.textContent = 'Same person';
+            mergeBtn.addEventListener('click', function () {
+                mergeCustomers(p.a, p.b);
+            });
+
+            var skipBtn = document.createElement('button');
+            skipBtn.className = 'btn small secondary';
+            skipBtn.textContent = 'Not the same';
+            skipBtn.addEventListener('click', function () {
+                var next = Object.assign({}, state.dismissedPairs);
+                next[pairKey(p.a.key, p.b.key)] = true;
+                S.setMeta('dismissedPairs', next).then(function () {
+                    state.dismissedPairs = next;
+                    return refreshAll();
+                });
+            });
+
+            li.appendChild(mergeBtn);
+            li.appendChild(document.createTextNode(' '));
+            li.appendChild(skipBtn);
+            list.appendChild(li);
+        });
+
+        show(box);
+    }
+
+    function pairKey(a, b) {
+        return [a, b].sort().join('|');
+    }
+
+    function mergeCustomers(from, into) {
+        var msg = 'Merge these into one customer?\n\n' +
+            '  ' + from.name + '  ->  ' + into.name + '\n\n' +
+            'Their utang will be added together (' +
+            peso((from.amount || 0) + (into.amount || 0)) + ' total) and every saved sheet will be updated.\n\n' +
+            'This cannot be undone automatically, so export a backup first if you are unsure.';
+
+        if (!window.confirm(msg)) return;
+
+        S.relabelCustomer(from.key, into.name).then(function () {
+            toast('Merged into ' + into.name + ' ✓', 'good');
+            return writeAutoBackup(false).then(refreshAll);
+        }).catch(function (err) {
+            console.error(err);
+            toast('Could not merge: ' + err.message, 'bad');
+        });
+    }
+
     function openCustomerModal(key) {
         var row = null;
         state.view.balances.forEach(function (b) { if (b.key === key) row = b; });
         if (!row) return;
 
+        state.modalKey = key;
         $('modal-title').textContent = row.name;
         $('modal-quickpay').dataset.key = key;
         $('modal-quickpay').dataset.name = row.name;
@@ -839,30 +1029,47 @@
             ? '<p class="notice warn">Owes you <strong>' + peso(row.amount) + '</strong></p>'
             : '<p class="notice info">All settled up ✓</p>';
 
+        // The sum the notes use: Remaining + Credits today − Credits paid
+        var math = '<div class="math-line">' +
+            '<span><em>Remaining last</em>' + peso(row.carriedLast || 0) + '</span>' +
+            '<span><em>+ New utang</em>' + peso(row.newUtang || 0) + '</span>' +
+            '<span><em>− Paid</em>' + peso(row.collected || 0) + '</span>' +
+            '<span class="total"><em>Owes now</em>' + peso(row.amount) + '</span>' +
+            '</div>';
+
+        if (row.manualUtang || row.manualCollected) {
+            math += '<p class="muted">Includes ' + peso(row.manualUtang || 0) +
+                ' new utang and ' + peso(row.manualCollected || 0) +
+                ' paid that you typed in by hand (not from a sheet).</p>';
+        }
+
         var hist = (state.view.history[key] || []).slice().reverse();
 
-        var body = head +
+        var body = head + math +
             '<div class="summary-cards">' +
             '<div class="card"><h3>Owes now</h3><p>' + peso(row.amount) + '</p></div>' +
-            '<div class="card"><h3>Given</h3><p>' + peso(row.owed || 0) + '</p></div>' +
-            '<div class="card"><h3>Paid</h3><p>' + peso(row.paid || 0) + '</p></div>' +
+            '<div class="card"><h3>Utang given</h3><p>' + peso(row.owedAllTime || 0) +
+                '</p><small>all time</small></div>' +
+            '<div class="card"><h3>Paid back</h3><p>' + peso(row.paidAllTime || 0) +
+                '</p><small>all time</small></div>' +
             '</div>';
 
         if (hist.length) {
-            body += '<h4 style="margin-top:16px">Balance from your Remaining lists</h4>' +
+            body += '<h4 style="margin-top:16px">Every Remaining list this name was on</h4>' +
                 '<div class="table-scroll"><table class="table"><thead><tr>' +
-                '<th>Sheet</th><th class="num">Balance</th><th class="num">Change</th>' +
+                '<th>Sheet</th><th class="num">Carried</th><th class="num">+ New</th>' +
+                '<th class="num">− Paid</th><th class="num">Ended At</th>' +
                 '</tr></thead><tbody>' +
-                hist.map(function (h, i) {
-                    var prev = hist[i + 1] ? hist[i + 1].amount : null;
-                    var delta = prev === null ? '' : peso(P.round2(h.amount - prev));
+                hist.map(function (h) {
                     return '<tr><td>' + P.prettyDate(h.dateKey) + '</td>' +
-                        '<td class="num">' + peso(h.amount) + '</td>' +
-                        '<td class="num">' + delta + '</td></tr>';
+                        '<td class="num">' + peso(h.carried || 0) + '</td>' +
+                        '<td class="num">' + peso(h.newUtang || 0) + '</td>' +
+                        '<td class="num">' + peso(h.collected || 0) + '</td>' +
+                        '<td class="num"><strong>' + peso(h.total || 0) + '</strong></td></tr>';
                 }).join('') +
                 '</tbody></table></div>';
         } else {
-            body += '<p class="muted">No Remaining history for this name yet.</p>';
+            body += '<p class="muted">This name has not been on a Remaining list yet.</p>';
         }
 
         $('modal-body').innerHTML = body;
@@ -870,6 +1077,48 @@
     }
 
     function closeModal() { hide($('modal-backdrop')); }
+
+    /** Rename a customer, or fold them into another name they were written as. */
+    function renameCustomer() {
+        var key = state.modalKey;
+        if (!key) return;
+
+        var row = null;
+        state.view.balances.forEach(function (b) { if (b.key === key) row = b; });
+        if (!row) return;
+
+        var entered = window.prompt(
+            'Name for this customer.\n\n' +
+            'You are allowed to write anything here - "aling nena", "yung sa kanto", ' +
+            'whatever helps you recognise them. Type an existing name to merge the two.',
+            row.name);
+
+        if (entered === null) return;
+        entered = entered.trim();
+        if (!entered || entered === row.name) return;
+
+        var target = null;
+        var targetKey = P.customerKeyOf(entered);
+        state.view.balances.forEach(function (b) {
+            if (b.key === targetKey && b.key !== key) target = b;
+        });
+
+        if (target) {
+            var msg = 'Merge ' + row.name + ' into ' + target.name + '?\n\n' +
+                'Their utang will be added together (' +
+                peso((row.amount || 0) + (target.amount || 0)) + ' total) and every saved sheet updated.';
+            if (!window.confirm(msg)) return;
+        }
+
+        S.relabelCustomer(key, entered).then(function () {
+            closeModal();
+            toast(target ? 'Merged into ' + target.name + ' ✓' : 'Renamed to ' + entered + ' ✓', 'good');
+            return writeAutoBackup(false).then(refreshAll);
+        }).catch(function (err) {
+            console.error(err);
+            toast('Could not rename: ' + err.message, 'bad');
+        });
+    }
 
     function saveManual() {
         var name = $('mf-name').value.trim();
@@ -1068,10 +1317,19 @@
         S.exportPayload(state.device).then(function (payload) {
             var stamp = new Date().toISOString().slice(0, 10);
             var name = 'water-backup-' + String(state.device).toLowerCase() + '-' + stamp + '.json';
-            downloadText(name, JSON.stringify(payload, null, 2), 'application/json');
-            return S.setMeta('lastExportAt', new Date().toISOString()).then(function () {
-                toast('Backup downloaded: ' + name, 'good');
-                renderStorageInfo();
+            var text = JSON.stringify(payload, null, 2);
+
+            return shareOrDownload(name, text, 'application/json', true).then(function (how) {
+                if (how === 'cancelled') {
+                    toast('Export cancelled — nothing was saved to a file.', 'bad');
+                    return null;
+                }
+                return S.setMeta('lastExportAt', new Date().toISOString()).then(function () {
+                    toast(how === 'shared'
+                        ? 'Backup shared: ' + name
+                        : 'Backup downloaded: ' + name, 'good');
+                    renderStorageInfo();
+                });
             });
         }).catch(function (err) {
             console.error(err);
@@ -1295,10 +1553,12 @@
 
     function exportUtangCsv() {
         var view = state.view;
-        var rows = [['Customer', 'Owes Now', 'Balance As Of', 'Given (all time)', 'Paid (all time)']];
+        var rows = [['Customer', 'Owes Now', 'Remaining Last', 'New Utang (this sheet)',
+                     'Paid (this sheet)', 'Balance As Of', 'Utang Given (all time)', 'Paid (all time)']];
 
         view.balances.forEach(function (b) {
-            rows.push([b.name, b.amount, b.asOf || '', b.owed || 0, b.paid || 0]);
+            rows.push([b.name, b.amount, b.carriedLast || 0, b.newUtang || 0, b.collected || 0,
+                       b.asOf || '', b.owedAllTime || 0, b.paidAllTime || 0]);
         });
 
         rows.push([]);
@@ -1459,6 +1719,7 @@
             renderQuickAddChips();
             $('mf-amount').focus();
         });
+        on($('modal-rename'), 'click', renameCustomer);
 
         on($('export-json-btn'), 'click', exportJson);
         on($('import-json-btn'), 'click', function () { $('import-file').click(); });

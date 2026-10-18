@@ -84,22 +84,45 @@ tells you it is off by one instead of quietly accepting it.
 | `Customers with change` | Change you owe them |
 | `Customers that borrowed gallons` | Containers lent out |
 
-`Remaining` is treated as the master record of who owes what, exactly like your
-notes. `540 mang tony` and `Berto 50` both work — the number can go before or
-after the name.
+`Remaining` is the master record of who owes what, exactly like your notes.
+`540 mang tony` and `Berto 50` both work — the number can go before or after
+the name.
+
+### How a balance is worked out
+
+`Remaining` is what the customer **already owed** when you started writing.
+`Credits today` is new utang on top of it. `Credits paid` is what they handed
+back. So:
+
+```
+owes now  =  Remaining  +  Credits today  -  Credits paid
+```
+
+Which is exactly how you write it down:
+
+```
+Remaining          Credits today
+150 Lito           75 Lito        ->  Lito owes 225
+125 Ricky          25 Ricky       ->  Ricky owes 150
+```
+
+The Entry tab shows that sum as a table (Remaining last / + New utang /
+− Paid / Owes now) before you save, and the Utang tab keeps it per customer.
 
 ---
 
 ## What the app checks for you
 
 - **Loaded gallons don't add up** — `35R` with 31 sold and 1 returned.
-- **Balances that don't roll forward** — last balance + new utang − collected
-  should equal the new balance. When it doesn't, you see the difference.
+- **Balances carried in at the wrong amount** — you ended at one number, then
+  started the next `Remaining` list at another.
 - **People who vanish from the list** — they were on your last `Remaining` list
   but not the newest one. Either they paid up, or you forgot to carry them over.
 - **Written totals that don't match** — `Expenses -450` when the lines add up to
   ₱915.
 - **Lines that were not counted** — nothing is silently ignored.
+- **Names that might be the same person** — `bernado` vs `bernardo`,
+  `tita marie` vs `marie`. It only suggests; it never merges on its own.
 
 Warnings never block saving. They are there to catch mistakes, not to argue.
 
@@ -114,10 +137,12 @@ unpaid balance into `Remaining` automatically.
 **📊 Dashboard** — all-time revenue, expenses, utang collected, money still owed,
 who owes you most, change you owe, gallons lent out, monthly totals.
 
-**👥 Utang** — one row per customer with what they owe now, what they have been
-given, and what they have paid. Tap a name to see how their balance moved
-week to week. **Record Manually** handles a payment made on a day you wrote no
-notes.
+**👥 Utang** — one row per customer: what they owe now, what they carried in,
+what was added, what was paid. Tap a name for the full breakdown and every
+`Remaining` list they have been on. **Record Manually** handles a payment made on
+a day you wrote no notes. **✏️ Rename / merge** fixes a name later — writing
+anything you like is fine, including `aling nena` when you do not know who
+they really are; type an existing name and the two ledgers join up.
 
 **📅 History** — every saved sheet. Tick two or more and press
 **🔗 Combine selected** to merge a weekend into one total (the originals are kept
@@ -127,12 +152,32 @@ and **↩️ Undo a combine** splits them back apart).
 
 ---
 
+## Installing it on your phone
+
+The app is a PWA, so it can live on your home screen and open with **no signal
+at all** — the whole thing is cached on the device the first time you visit.
+
+**Android (Chrome):** open the site, tap **⋮** → **Add to Home screen** /
+**Install app**. It then opens full-screen with its own icon, like a normal app.
+
+**iPhone (Safari):** open the site, tap **Share** → **Add to Home Screen**.
+
+Once installed it works offline, so a trip with no signal is fine. If the phone
+has no signal you get a small banner at the bottom; everything still saves.
+
+> Do not use Incognito / Private mode — the browser throws the data away when
+> you close the tab.
+
+---
+
 ## Moving between laptop and phone
 
 The laptop is the master copy. The phone is for entering the day.
 
 1. Enter the day's notes on the phone and **Save Sheet**.
-2. Phone → **Backup** → **Export Backup (.json)** → send the file to yourself.
+2. Phone → **Backup** → **Export Backup (.json)**. On a phone this opens the
+   share sheet, so you can send it straight to Drive, email, or a chat with
+   yourself.
 3. Laptop → **Backup** → **Import from another device** → pick the file.
 
 Importing **merges**: newer copies win by timestamp, nothing is ever deleted, and
@@ -143,8 +188,9 @@ importing the same file twice changes nothing.
 ## Keeping your data safe
 
 Everything is stored in a real local database (IndexedDB) inside the browser, not
-in a cookie or a login. It survives browser restarts and updates, but **clearing
-your browsing data will erase it**.
+in a cookie or a login. It survives browser restarts, updates, running out of
+memory, and the phone rebooting. **Clearing your browsing data or uninstalling
+the browser will erase it.**
 
 So the app nags you:
 
@@ -152,15 +198,35 @@ So the app nags you:
   to keep it permanently.
 - The footer warns you when you have saved sheets but have never exported, or
   when the last backup is over a week old.
-- On Chrome or Edge you can pick a backup file once under
+- On Chrome or Edge (desktop) you can pick a backup file once under
   **Automatic file backup**, and the app rewrites it every time you save — so a
   copy always exists outside the browser.
 
-**Export before updating your browser or switching computers.**
+**Export before clearing browsing data or switching phones.**
+
+---
+
+## Files
+
+| File | What it is |
+|---|---|
+| `index.html` | The 5-tab interface |
+| `parser.js` | Reads your notes; all the business maths |
+| `store.js` | The local database, combining, export/import |
+| `app.js` | Screen wiring, tables, modals |
+| `style.css` | Styling and the phone layout |
+| `sw.js` | Service worker — makes it work offline |
+| `manifest.webmanifest` | Makes it installable |
+| `dev/tests.html` | The test suite |
+| `dev/make-icons.py` | Redraws the app icons |
+
+`sw.js` starts with a `VERSION` line. Bump it whenever you change any file so
+phones pick up the new copy.
 
 ---
 
 ## Running the tests
 
-Open `dev/tests.html` in the browser. It runs 83 checks covering the parser,
-the loaded-gallon reconciliation, every date format, and all the section types.
+Open `dev/tests.html` in the browser. It runs 110 checks covering the parser,
+the carry-forward balances, the loaded-gallon reconciliation, name matching,
+every date format, and all the section types.

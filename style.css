@@ -432,3 +432,67 @@ code {
 @media (max-width: 380px) {
     .summary-cards { grid-template-columns: 1fr; }
 }
+
+/* =========================================================
+   Customer modal: Remaining Last + New - Paid = Owes Now
+   ========================================================= */
+
+.math-line {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 14px 0 6px;
+}
+
+.math-line span {
+    flex: 1 1 104px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 9px 11px;
+    font-size: 15px;
+    font-weight: 700;
+    text-align: right;
+    white-space: nowrap;
+}
+
+.math-line span em {
+    display: block;
+    font-style: normal;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .03em;
+    text-transform: uppercase;
+    color: var(--muted);
+    text-align: left;
+    margin-bottom: 2px;
+}
+
+.math-line span.total {
+    border-color: var(--orange);
+    color: var(--orange);
+}
+
+/* Lookalike merge buttons inside the list */
+#lookalike-list li {
+    margin-bottom: 8px;
+    line-height: 1.9;
+}
+
+/* =========================================================
+   Offline banner
+   ========================================================= */
+
+.offline-banner {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 60;
+    padding: 9px 16px calc(9px + env(safe-area-inset-bottom, 0px));
+    background: #22303c;
+    color: #fff;
+    font-size: 13px;
+    text-align: center;
+    box-shadow: 0 -2px 10px rgba(0, 0, 0, .18);
+}

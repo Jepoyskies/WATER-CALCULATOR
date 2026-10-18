@@ -1,0 +1,55 @@
+{
+  "id": "watercalc-v2",
+  "name": "Water Delivery Manager",
+  "short_name": "Water Calc",
+  "description": "Trip log, utang ledger and expenses for a water delivery run. Works offline.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait",
+  "background_color": "#f4f7f6",
+  "theme_color": "#0275d8",
+  "lang": "en-PH",
+  "categories": ["business", "productivity", "finance"],
+  "icons": [
+    {
+      "src": "icons/favicon-64.png",
+      "sizes": "64x64",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Start New Day",
+      "short_name": "New Day",
+      "url": "./?action=newday",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Who owes me",
+      "short_name": "Utang",
+      "url": "./?action=utang",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
+  ]
+}

@@ -396,6 +396,7 @@
             });
 
             merged.totals = P.calculateTotals(merged);
+            merged.balances = P.computeBalances(merged);
 
             var now = new Date().toISOString();
 
@@ -509,6 +510,89 @@
         });
     }
 
+    /**
+     * Renames a customer, or folds them into an existing name.
+     *
+     * "aling nena" is a perfectly good name when you do not know who the
+     * person really is. But later you might learn it, or you might have typed
+     * the same customer two different ways. Keys are the normalised name, so
+     * renaming onto a name that already exists merges the two ledgers.
+     *
+     * Customer names live inside sheet.parsed, so this rewrites every sheet
+     * and manual entry that mentions them, then recomputes balances.
+     */
+    function relabelCustomer(fromKey, newName) {
+        var P = global.WCParser;
+        var cleaned = String(newName || '').trim().replace(/\s+/g, ' ');
+        var toKey = P.customerKeyOf(cleaned);
+
+        if (!fromKey) return Promise.reject(new Error('Nothing selected.'));
+        if (!toKey) return Promise.reject(new Error('Type a name first.'));
+
+        var merged = toKey !== fromKey;
+
+        function fixSheet(sheet) {
+            var parsed = sheet.parsed || {};
+            var touched = false;
+
+            function sweep(list) {
+                if (!Array.isArray(list)) return;
+                list.forEach(function (item) {
+                    if (item && item.key === fromKey) {
+                        item.key = toKey;
+                        item.name = cleaned;
+                        touched = true;
+                    }
+                });
+            }
+
+            sweep(parsed.remainingSnapshot);
+            sweep(parsed.ledger);
+            sweep(parsed.borrowed);
+
+            ['expenses', 'creditsToday', 'creditsPaid', 'remaining', 'change'].forEach(function (sec) {
+                var s = parsed[sec];
+                if (s && Array.isArray(s.named)) sweep(s.named);
+            });
+
+            if (touched && P && P.computeBalances) {
+                parsed.balances = P.computeBalances(parsed);
+            }
+            return touched;
+        }
+
+        return Promise.all([getAllSheets(), listManual()]).then(function (res) {
+            var sheets = res[0];
+            var manual = res[1];
+            var ops = [];
+            var stat = { merged: merged, sheets: 0, manual: 0 };
+
+            sheets.forEach(function (sheet) {
+                if (fixSheet(sheet)) {
+                    stat.sheets++;
+                    ops.push({ type: 'put', store: 'sheets', value: sheet });
+                }
+            });
+
+            manual.forEach(function (m) {
+                if (m.customerKey === fromKey) {
+                    m.customerKey = toKey;
+                    m.customerName = cleaned;
+                    stat.manual++;
+                    ops.push({ type: 'put', store: 'manual', value: m });
+                }
+            });
+
+            ops.push({ type: 'delete', store: 'customers', key: fromKey });
+            ops.push({
+                type: 'put', store: 'customers',
+                value: { key: toKey, name: cleaned, createdAt: new Date().toISOString() }
+            });
+
+            return E().batch(ops).then(function () { return stat; });
+        });
+    }
+
     /* =========================================================
        Derived view: balances and ledgers
        ========================================================= */
@@ -529,12 +613,13 @@
     function buildSnapshotView(sheets, manual) {
         var P = global.WCParser;
 
-        var history = {};    // key -> [{dateKey, amount}]
-        var names = {};      // key -> display name
-        var latest = {};     // key -> {key,name,amount,dateKey}
-        var previous = {};   // key -> amount (snapshot before the latest one)
-        var lastSnapshotDate = null;
-        var previousSnapshotDate = null;
+        var history = {};        // key -> [{dateKey, carried, newUtang, collected, total}]
+        var names = {};          // key -> display name
+        var latest = {};         // key -> row from the newest sheet with a Remaining list
+        var before = {};         // key -> row from the sheet before that
+        var lastDate = null;
+        var beforeDate = null;
+        var anySheet = false;
 
         var change = [];
         var borrowed = [];
@@ -542,92 +627,106 @@
         sheets.forEach(function (sheet) {
             var parsed = sheet.parsed || {};
             var dateKey = sheet.startDateKey || sheet.id;
-            var snap = parsed.remainingSnapshot || [];
+            var list = parsed.balances || [];
 
-            if (snap.length) {
-                previousSnapshotDate = lastSnapshotDate;
-                previous = {};
-                Object.keys(latest).forEach(function (k) { previous[k] = latest[k].amount; });
+            if (list.length) {
+                anySheet = true;
+                before = latest;
+                beforeDate = lastDate;
 
-                var seen = {};
                 var fresh = {};
-
-                snap.forEach(function (s) {
-                    if (s.key === '__unassigned__') return;
-                    names[s.key] = s.name;
-                    seen[s.key] = true;
-
-                    if (!history[s.key]) history[s.key] = [];
-                    history[s.key].push({ dateKey: dateKey, amount: s.amount });
-
-                    fresh[s.key] = { key: s.key, name: s.name, amount: s.amount, dateKey: dateKey };
+                list.forEach(function (b) {
+                    if (!b.key || b.key === '__unassigned__') return;
+                    if (!names[b.key]) names[b.key] = b.name;
+                    fresh[b.key] = {
+                        key: b.key, name: names[b.key],
+                        total: b.total,
+                        carried: b.carried, given: b.given, paid: b.paid,
+                        dateKey: dateKey
+                    };
+                    if (!history[b.key]) history[b.key] = [];
+                    history[b.key].push({
+                        dateKey: dateKey,
+                        carried: b.carried, newUtang: b.given,
+                        collected: b.paid, total: b.total
+                    });
                 });
 
                 latest = fresh;
-                lastSnapshotDate = dateKey;
+                lastDate = dateKey;
             }
 
             (parsed.change && parsed.change.named ? parsed.change.named : []).forEach(function (c) {
                 if (c.key === '__unassigned__') return;
+                if (!names[c.key]) names[c.key] = c.name;
                 change.push({ key: c.key, name: c.name, amount: c.amount, dateKey: dateKey });
             });
 
             (parsed.borrowed || []).forEach(function (b) {
-                borrowed.push({
-                    key: P.customerKeyOf(b.name),
-                    name: b.name,
-                    gallons: b.gallons,
-                    dateKey: dateKey
-                });
+                var k = P.customerKeyOf(b.name);
+                if (k && !names[k]) names[k] = b.name;
+                borrowed.push({ key: k, name: b.name, gallons: b.gallons, dateKey: dateKey });
             });
         });
 
-        // Lifetime given/paid per customer
-        var given = {};
-        var paid = {};
+        // All-time totals per customer
+        var owedAllTime = {};
+        var paidAllTime = {};
         sheets.forEach(function (sheet) {
             ((sheet.parsed || {}).ledger || []).forEach(function (e) {
-                names[e.key] = names[e.key] || e.name;
-                if (e.type === 'given') given[e.key] = (given[e.key] || 0) + e.amount;
-                else paid[e.key] = (paid[e.key] || 0) + e.amount;
+                if (!names[e.key]) names[e.key] = e.name;
+                if (e.type === 'given') owedAllTime[e.key] = (owedAllTime[e.key] || 0) + e.amount;
+                else paidAllTime[e.key] = (paidAllTime[e.key] || 0) + e.amount;
             });
         });
         (manual || []).forEach(function (m) {
-            names[m.customerKey] = names[m.customerKey] || m.customerName;
-            if (m.type === 'given') given[m.customerKey] = (given[m.customerKey] || 0) + m.amount;
-            else paid[m.customerKey] = (paid[m.customerKey] || 0) + m.amount;
+            if (!m.customerKey) return;
+            if (!names[m.customerKey]) names[m.customerKey] = m.customerName;
+            if (m.type === 'given') owedAllTime[m.customerKey] = (owedAllTime[m.customerKey] || 0) + m.amount;
+            else paidAllTime[m.customerKey] = (paidAllTime[m.customerKey] || 0) + m.amount;
         });
 
-        var balances = Object.keys(latest).map(function (k) {
-            var row = latest[k];
+        // Payments typed in after the newest sheet ride on top of it
+        var adjust = {};
+        (manual || []).forEach(function (m) {
+            if (!m.customerKey) return;
+            if (lastDate && String(m.dateKey || '') < String(lastDate)) return;
+            if (!adjust[m.customerKey]) adjust[m.customerKey] = { given: 0, paid: 0 };
+            if (m.type === 'given') adjust[m.customerKey].given += m.amount;
+            else adjust[m.customerKey].paid += m.amount;
+        });
+
+        function buildRow(k, row) {
+            var adj = adjust[k] || { given: 0, paid: 0 };
+            var amount = P.round2(row.total + adj.given - adj.paid);
             return {
                 key: k,
                 name: names[k] || row.name,
-                amount: row.amount,
-                asOf: row.dateKey,
-                owed: P.round2(given[k] || 0),
-                paid: P.round2(paid[k] || 0),
-                status: 'current'
+                amount: amount,
+                carriedLast: P.round2(row.carried),
+                newUtang: P.round2(row.given + adj.given),
+                collected: P.round2(row.paid + adj.paid),
+                sheetUtang: P.round2(row.given),
+                sheetCollected: P.round2(row.paid),
+                manualUtang: P.round2(adj.given),
+                manualCollected: P.round2(adj.paid),
+                asOf: row.dateKey || null,
+                owedAllTime: P.round2(owedAllTime[k] || 0),
+                paidAllTime: P.round2(paidAllTime[k] || 0),
+                status: amount > 0 ? 'current' : 'settled'
             };
+        }
+
+        var balances = Object.keys(latest).map(function (k) {
+            return buildRow(k, latest[k]);
         });
 
-        // People who were on an older list but are absent from the newest one
-        var missing = Object.keys(previous)
-            .filter(function (k) { return !latest[k]; })
-            .map(function (k) {
-                return { key: k, name: names[k] || k, amount: previous[k], asOf: previousSnapshotDate };
-            });
-
-        // Anyone who only ever appears in manual entries
-        Object.keys(given).concat(Object.keys(paid)).forEach(function (k) {
+        // Customers who only ever show up in manual entries
+        Object.keys(owedAllTime).concat(Object.keys(paidAllTime)).forEach(function (k) {
             if (latest[k]) return;
-            var already = balances.some(function (b) { return b.key === k; });
-            if (already) return;
-            balances.push({
-                key: k, name: names[k] || k, amount: 0, asOf: null,
-                owed: P.round2(given[k] || 0), paid: P.round2(paid[k] || 0),
-                status: 'settled'
-            });
+            if (balances.some(function (b) { return b.key === k; })) return;
+            balances.push(buildRow(k, { name: names[k] || k, total: 0, carried: 0,
+                                        given: 0, paid: 0, dateKey: null }));
         });
 
         balances.sort(function (a, b) {
@@ -635,58 +734,34 @@
             return String(a.name).localeCompare(String(b.name));
         });
 
-        // Roll-forward check on the newest sheet with a snapshot
+        // People who owed on the previous list but are not mentioned in the newest one
+        var missing = Object.keys(before)
+            .filter(function (k) { return !latest[k] && before[k].total > 0; })
+            .map(function (k) {
+                return { key: k, name: names[k] || k, amount: before[k].total, asOf: beforeDate };
+            })
+            .sort(function (a, b) { return b.amount - a.amount; });
+
+        // The carried amount should equal what the customer ended at last time
         var rollForward = [];
-        var newest = null;
-        sheets.forEach(function (s) {
-            if (((s.parsed || {}).remainingSnapshot || []).length) newest = s;
-        });
-
-        if (newest) {
-            var prevSheet = null;
-            sheets.forEach(function (s) {
-                if (s === newest) return;
-                if (String(s.startDateKey) >= String(newest.startDateKey)) return;
-                if (!((s.parsed || {}).remainingSnapshot || []).length) return;
-                if (!prevSheet || String(s.startDateKey) > String(prevSheet.startDateKey)) prevSheet = s;
-            });
-
-            if (prevSheet) {
-                var prevMap = {};
-                (prevSheet.parsed.remainingSnapshot || []).forEach(function (s) { prevMap[s.key] = s.amount; });
-
-                var nowMap = {};
-                (newest.parsed.remainingSnapshot || []).forEach(function (s) { nowMap[s.key] = s.amount; });
-
-                var gaveMap = {};
-                var paidMap = {};
-                ((newest.parsed || {}).ledger || []).forEach(function (e) {
-                    if (e.type === 'given') gaveMap[e.key] = (gaveMap[e.key] || 0) + e.amount;
-                    else paidMap[e.key] = (paidMap[e.key] || 0) + e.amount;
-                });
-
-                var allKeys = Object.keys(prevMap).concat(Object.keys(nowMap));
-                allKeys.forEach(function (k) {
-                    if (allKeys.indexOf(k) !== allKeys.lastIndexOf(k)) return;
-                    var before = prevMap[k] || 0;
-                    var after = nowMap[k] || 0;
-                    var expected = P.round2(before + (gaveMap[k] || 0) - (paidMap[k] || 0));
-                    var diff = P.round2(after - expected);
-                    if (Math.abs(diff) >= 0.5) {
-                        rollForward.push({
-                            key: k,
-                            name: names[k] || k,
-                            before: before,
-                            given: gaveMap[k] || 0,
-                            paid: paidMap[k] || 0,
-                            expected: expected,
-                            actual: after,
-                            diff: diff
-                        });
-                    }
+        Object.keys(latest).forEach(function (k) {
+            if (!before[k]) return;
+            var endedAt = before[k].total;
+            var carried = latest[k].carried;
+            var diff = P.round2(carried - endedAt);
+            if (Math.abs(diff) >= 0.5) {
+                rollForward.push({
+                    key: k,
+                    name: names[k] || k,
+                    endedAt: P.round2(endedAt),
+                    carried: P.round2(carried),
+                    diff: diff,
+                    asOf: beforeDate,
+                    dateKey: latest[k].dateKey
                 });
             }
-        }
+        });
+        rollForward.sort(function (a, b) { return Math.abs(b.diff) - Math.abs(a.diff); });
 
         // Merge borrowed gallons by name (newest count wins, they are a live count)
         var borrowMap = {};
@@ -697,7 +772,8 @@
             history: history,
             missing: missing,
             rollForward: rollForward,
-            lastSnapshotDate: lastSnapshotDate,
+            lastSnapshotDate: lastDate,
+            hasSnapshot: anySheet,
             change: {
                 list: change,
                 total: P.round2(change.reduce(function (a, c) { return a + c.amount; }, 0))
@@ -871,6 +947,8 @@
         deleteManual: deleteManual,
         listCustomers: listCustomers,
         registerCustomers: registerCustomers,
+        touchCustomer: touchCustomer,
+        relabelCustomer: relabelCustomer,
 
         snapshotView: snapshotView,
         buildSnapshotView: buildSnapshotView,

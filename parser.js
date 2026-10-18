@@ -243,6 +243,64 @@
             .trim();
     }
 
+    /** Plain Levenshtein distance. Short strings only, so the simple version is fine. */
+    function editDistance(a, b) {
+        a = String(a); b = String(b);
+        if (a === b) return 0;
+        if (!a.length) return b.length;
+        if (!b.length) return a.length;
+
+        var prev = [];
+        for (var j = 0; j <= b.length; j++) prev[j] = j;
+
+        for (var i = 1; i <= a.length; i++) {
+            var cur = [i];
+            for (var k = 1; k <= b.length; k++) {
+                var cost = a.charAt(i - 1) === b.charAt(k - 1) ? 0 : 1;
+                cur[k] = Math.min(prev[k] + 1, cur[k - 1] + 1, prev[k - 1] + cost);
+            }
+            prev = cur;
+        }
+        return prev[b.length];
+    }
+
+    /**
+     * Names that might be the same person written two ways.
+     *
+     * Names like "aling nena" are fine as they are - you often do not know
+     * the real name - so this never changes anything by itself. It just offers
+     * a merge when two entries look alike: "bernado" / "bernardo",
+     * "tita marie" / "marie".
+     *
+     * rows: [{key, name}] -> [{a, b, distance, reason}]
+     */
+    function findLookalikes(rows) {
+        var list = (rows || []).filter(function (r) {
+            return r && r.key && r.key !== '__unassigned__';
+        });
+        var out = [];
+
+        for (var i = 0; i < list.length; i++) {
+            for (var j = i + 1; j < list.length; j++) {
+                var A = list[i], B = list[j];
+                var ka = String(A.key).replace(/\s+/g, '');
+                var kb = String(B.key).replace(/\s+/g, '');
+                var reason = null;
+                var d = editDistance(ka, kb);
+
+                if (Math.max(ka.length, kb.length) >= 4 && d > 0 && d <= 2) {
+                    reason = 'looks like a typo';
+                } else if (Math.min(ka.length, kb.length) >= 5 &&
+                           (ka.indexOf(kb) >= 0 || kb.indexOf(ka) >= 0)) {
+                    reason = 'one name is inside the other';
+                }
+
+                if (reason) out.push({ a: A, b: B, distance: d, reason: reason });
+            }
+        }
+        return out;
+    }
+
     /**
      * Pulls an amount and (optionally) a customer name out of one line.
      *   "540 mang tony"          -> 540, "Mang Tony"
@@ -353,6 +411,7 @@
             creditsPaid: blankSection(),
             remaining: blankSection(),
             remainingSnapshot: [],  // [{key,name,amount}] - who owes what
+            balances: [],           // [{key,name,carried,given,paid,total}]
             change: blankSection(), // customers holding change for us
             borrowed: [],           // [{name,gallons}] - containers out
             days: [],               // [{dateKey,label,trips}]
@@ -620,10 +679,68 @@
             if (trip.diff === null) trip.diff = 0;
         });
 
+        data.balances = computeBalances(data);
         data.totals = calculateTotals(data);
         data.dateKeys.sort();
 
         return data;
+    }
+
+    /* =========================================================
+       Customer balances
+
+       How the notes work:
+         Remaining      = what the customer already owed (carried in)
+         Credits today  = new utang handed out this sheet
+         Credits paid   = money collected this sheet
+
+         owes now  =  carried  +  new utang  -  collected
+
+       So "125 Ricky" plus "25 Ricky" under Credits today
+       means Ricky owes 150.
+       ========================================================= */
+
+    function computeBalances(data) {
+        var map = {};
+
+        function touch(key, name) {
+            if (!map[key]) {
+                map[key] = {
+                    key: key, name: name || key,
+                    carried: 0, given: 0, paid: 0, total: 0, settled: false
+                };
+            }
+            if (name && map[key].name === map[key].key) map[key].name = name;
+            return map[key];
+        }
+
+        (data.remainingSnapshot || []).forEach(function (s) {
+            if (s.key === '__unassigned__') return;
+            touch(s.key, s.name).carried += s.amount;
+        });
+
+        (data.ledger || []).forEach(function (e) {
+            var row = touch(e.key, e.name);
+            if (e.type === 'given') row.given += e.amount;
+            else row.paid += e.amount;
+        });
+
+        var out = Object.keys(map).map(function (k) {
+            var row = map[k];
+            row.total = round2(row.carried + row.given - row.paid);
+            row.settled = row.total <= 0;
+            row.carried = round2(row.carried);
+            row.given = round2(row.given);
+            row.paid = round2(row.paid);
+            return row;
+        });
+
+        out.sort(function (a, b) {
+            if (b.total !== a.total) return b.total - a.total;
+            return String(a.name).localeCompare(String(b.name));
+        });
+
+        return out;
     }
 
     /* =========================================================
@@ -726,12 +843,15 @@
     global.WCParser = {
         parse: parse,
         calculateTotals: calculateTotals,
+        computeBalances: computeBalances,
         buildNewDayTemplate: buildNewDayTemplate,
         extractDate: extractDate,
         extractStatedTotal: extractStatedTotal,
         parseLedgerLine: parseLedgerLine,
         parseBorrowLine: parseBorrowLine,
         customerKeyOf: customerKeyOf,
+        editDistance: editDistance,
+        findLookalikes: findLookalikes,
         detectSection: detectSection,
         toDateKey: toDateKey,
         todayKey: todayKey,

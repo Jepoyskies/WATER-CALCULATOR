@@ -309,6 +309,103 @@
     check('J: template balances to its people', rt.remainingSnapshot.length, 2);
 
     /* ==========================================================
+       K. Balances: Remaining + Credits today - Credits paid
+
+       The rule from the real notes: what you write under Remaining is
+       what they ALREADY owed. Credits today is new utang on top of it.
+       ========================================================== */
+    var k = P.parse([
+        'Expenses', '60 lunch', '20 bread', '100 load', '150 pamasahe', '200 food', '',
+        'Credits today', '75 Lito', '25 Ricky', '',
+        'Credits paid', '',
+        'Remaining', '50 berto', 'Tito Marvin 50', '540 mang tony', '125 Ricky', '150 Lito', '',
+        'Oct 17', '36R', '5 return', '25x28', '20x3', '',
+        'Oct 18', '36R', '25x30', '20x6', '',
+        '38R', '4 return', '25x29', '20x5', '',
+        '37R', '12 return', '25x18', '20x7'
+    ].join('\n'));
+
+    function bal(parsed, name) {
+        var key = P.customerKeyOf(name);
+        var hit = null;
+        (parsed.balances || []).forEach(function (b) { if (b.key === key) hit = b; });
+        return hit;
+    }
+
+    check('K: all four trips balance', k.trips.map(function (t) { return t.diff; }), [0, 0, 0, 0]);
+    check('K: two dates', k.dateKeys, [y + '-10-17', y + '-10-18']);
+    check('K: revenue', k.totals.totalRevenue, 760 + 870 + 825 + 590);
+    check('K: expenses', k.expenses.total, 530);
+    check('K: five people carry a balance',
+        k.balances.filter(function (b) { return b.total > 0; }).length, 5);
+
+    var lito = bal(k, 'Lito');
+    check('K: Lito carried 150 in', lito.carried, 150);
+    check('K: Lito got 75 more', lito.given, 75);
+    check('K: Lito now owes 225', lito.total, 225);
+
+    var ricky = bal(k, 'Ricky');
+    check('K: Ricky carried 125 in', ricky.carried, 125);
+    check('K: Ricky now owes 150', ricky.total, 150);
+
+    check('K: Mang Tony untouched', bal(k, 'Mang Tony').total, 540);
+    check('K: Berto untouched', bal(k, 'Berto').total, 50);
+    check('K: Tito Marvin untouched', bal(k, 'Tito Marvin').total, 50);
+    check('K: nothing owed in total',
+        P.round2(k.balances.reduce(function (a, b) { return a + b.total; }, 0)), 1015);
+
+    // A payment reduces the balance
+    var paid = P.computeBalances({
+        remainingSnapshot: [{ key: 'berto', name: 'Berto', amount: 500 }],
+        ledger: [
+            { key: 'berto', name: 'Berto', type: 'given', amount: 100 },
+            { key: 'berto', name: 'Berto', type: 'paid', amount: 250 }
+        ]
+    });
+    check('K: carried + given - paid', paid[0].total, 350);
+    check('K: settled when it reaches zero', P.computeBalances({
+        remainingSnapshot: [{ key: 'a', name: 'A', amount: 100 }],
+        ledger: [{ key: 'a', name: 'A', type: 'paid', amount: 100 }]
+    })[0].settled, true);
+    check('K: someone only in Credits today still owes',
+        P.computeBalances({ remainingSnapshot: [], ledger: [
+            { key: 'new guy', name: 'New Guy', type: 'given', amount: 60 }
+        ] })[0].total, 60);
+    check('K: the unassigned bucket is dropped',
+        P.computeBalances({ remainingSnapshot: [
+            { key: '__unassigned__', name: null, amount: 300 }
+        ], ledger: [] }).length, 0);
+    check('K: ordered by what they owe', k.balances[0].name, 'Mang Tony');
+
+    /* ==========================================================
+       L. Name matching
+       ========================================================== */
+    check('L: case and spacing fold together',
+        P.customerKeyOf('  Mang   Tony ') === P.customerKeyOf('mang tony'), true);
+    check('L: punctuation is ignored',
+        P.customerKeyOf('Mang Tony!') === P.customerKeyOf('mang tony'), true);
+    check('L: accents survive', P.customerKeyOf('Pe\u00F1a'), 'pe\u00F1a');
+    check('L: edit distance', P.editDistance('bernardo', 'bernado'), 1);
+    check('L: distance to itself is zero', P.editDistance('berto', 'berto'), 0);
+
+    var looks = P.findLookalikes([
+        { key: 'tita marie', name: 'Tita Marie' },
+        { key: 'marie', name: 'Marie' },
+        { key: 'bernardo', name: 'Bernardo' },
+        { key: 'bernado', name: 'Bernado' },
+        { key: 'mang tony', name: 'Mang Tony' },
+        { key: 'berto', name: 'Berto' }
+    ]);
+    var lookKeys = looks.map(function (p) { return p.a.key + '|' + p.b.key; });
+
+    ok('L: a descriptor like "tita marie" is offered as a merge with "marie"',
+        lookKeys.indexOf('tita marie|marie') >= 0, JSON.stringify(lookKeys));
+    ok('L: "bernardo" matches a misspelled "bernado"',
+        lookKeys.indexOf('bernardo|bernado') >= 0, JSON.stringify(lookKeys));
+    ok('L: Mang Tony and Berto stay separate',
+        lookKeys.indexOf('berto|mang tony') < 0, JSON.stringify(lookKeys));
+
+    /* ==========================================================
        render
        ========================================================== */
     var passCount = results.filter(function (x) { return x.ok; }).length;
