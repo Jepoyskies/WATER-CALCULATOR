@@ -1,6 +1,7 @@
 package ph.watercalc.app;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.webkit.WebSettings;
@@ -11,12 +12,13 @@ import android.webkit.WebView;
  *
  * The whole web app is packaged inside the APK and served to the WebView by
  * AssetSite, so this never needs a network connection - not on the first run,
- * not ever - and everything it stores stays in this app's own private folder
- * where nothing else on the phone can read or clear it.
+ * not ever - and everything it stores stays in this app's own private folder,
+ * where nothing else on the phone can read it or clear it out.
  */
-public class MainActivity extends Activity {
+public class MainActivity extends Activity implements DocumentFlow.Listener {
 
     private WebView web;
+    private DocumentFlow flow;
 
     @Override
     protected void onCreate(Bundle saved) {
@@ -38,7 +40,11 @@ public class MainActivity extends Activity {
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(false);    // respect the app's own viewport tag
 
+        flow = new DocumentFlow(this, this);
+
         web.setWebViewClient(new AssetSite(this));
+        web.setWebChromeClient(flow);
+        web.addJavascriptInterface(new NativeBridge(this), NativeBridge.NAME);
 
         setContentView(web);
 
@@ -46,6 +52,17 @@ public class MainActivity extends Activity {
             web.loadUrl(AssetSite.ORIGIN + AssetSite.HOME);
         } else {
             web.restoreState(saved);
+        }
+    }
+
+    DocumentFlow flow() {
+        return flow;
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (flow == null || !flow.onActivityResult(requestCode, resultCode, data)) {
+            super.onActivityResult(requestCode, resultCode, data);
         }
     }
 
@@ -60,5 +77,15 @@ public class MainActivity extends Activity {
         // Let the app's own history win first, so a half-typed sheet is not lost
         if (web != null && web.canGoBack()) web.goBack();
         else super.onBackPressed();
+    }
+
+    /** Tells the page how the save went, so it can say so on screen. */
+    @Override
+    public void onSaveFinished(String status) {
+        if (web == null) return;
+        web.evaluateJavascript(
+                "window.__waterCalcSaveResult && window.__waterCalcSaveResult('"
+                        + (status == null ? "failed" : status) + "')",
+                null);
     }
 }

@@ -11,7 +11,7 @@
 
 // Bump this whenever you change any of the files below. The new worker takes
 // over on the next load and quietly drops the old cache.
-var VERSION = 'watercalc-v6';
+var VERSION = 'watercalc-v7';
 
 
 var SHELL = [

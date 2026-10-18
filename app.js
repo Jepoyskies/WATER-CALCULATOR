@@ -71,7 +71,61 @@
         return true;
     }
 
+    /**
+     * True inside the packaged Android app, which is a WebView rather than a
+     * browser. A WebView has no downloader at all, so a file it is handed
+     * just goes nowhere - the app has to be asked instead.
+     */
+    function packagedApp() {
+        return !!(window.WaterCalcApp && window.WaterCalcApp.saveFile);
+    }
+
+    /**
+     * Asks the phone app to keep a file. The app answers with Android's own
+     * "where do you want to save this" dialog, which reaches Google Drive and
+     * the Downloads folder as well as the phone itself - so a backup can sit
+     * somewhere that losing the phone cannot take with it.
+     *
+     * Resolves with 'saved', 'cancelled' or 'failed'. The answer arrives
+     * later, when the app calls back into __waterCalcSaveResult.
+     */
+    function saveThroughApp(filename, text, mime, noBom) {
+        return new Promise(function (resolve) {
+            var settled = false;
+
+            function finish(status) {
+                if (settled) return;
+                settled = true;
+                window.__waterCalcSaveResult = null;
+                resolve(status);
+            }
+
+            window.__waterCalcSaveResult = finish;
+
+            // The app always reports back, but do not hang forever on it.
+            setTimeout(function () { finish('failed'); }, 300000);
+
+            try {
+                window.WaterCalcApp.saveFile(filename, mime || 'text/plain',
+                                             noBom ? text : '\uFEFF' + text);
+            } catch (err) {
+                console.warn('The app would not take the file:', err);
+                finish('failed');
+            }
+        });
+    }
+
     function downloadText(filename, text, mime, noBom) {
+        if (packagedApp()) {
+            saveThroughApp(filename, text, mime, noBom).then(function (status) {
+                if (status === 'failed') toast('Could not save ' + filename, 'bad');
+            });
+            return;
+        }
+        browserDownload(filename, text, mime, noBom);
+    }
+
+    function browserDownload(filename, text, mime, noBom) {
         var body = noBom ? text : '\uFEFF' + text;
         var blob = new Blob([body], { type: (mime || 'text/plain') + ';charset=utf-8' });
         var url = URL.createObjectURL(blob);
@@ -89,16 +143,14 @@
     /**
      * Picks the best way to hand a file to the user:
      *
-     *   1. Inside the packaged phone app -> write it with the Filesystem
-     *      plugin and open the Android share sheet. A WebView cannot download
-     *      a blob the way a browser tab can.
+     *   1. Inside the packaged phone app -> let Android ask where to put it.
      *   2. A phone browser that can share files -> the share sheet.
      *   3. Anything else -> an ordinary download.
      *
-     * Resolves with 'shared', 'downloaded' or 'cancelled'.
+     * Resolves with 'shared', 'saved', 'downloaded' or 'cancelled'.
      */
     function shareOrDownload(filename, text, mime, noBom) {
-        if (isNativeApp()) return nativeShare(filename, text, mime, noBom);
+        if (packagedApp()) return saveThroughApp(filename, text, mime, noBom);
 
         var type = mime || 'text/plain';
         var body = noBom ? text : '\uFEFF' + text;
@@ -126,44 +178,6 @@
 
         downloadText(filename, text, type, noBom);
         return Promise.resolve('downloaded');
-    }
-
-    function isNativeApp() {
-        return !!(window.Capacitor && window.Capacitor.isNativePlatform &&
-                  window.Capacitor.isNativePlatform());
-    }
-
-    function nativeShare(filename, text, mime, noBom) {
-        var Plugins = (window.Capacitor && window.Capacitor.Plugins) || {};
-        var body = noBom ? text : '\uFEFF' + text;
-
-        if (!Plugins.Filesystem || !Plugins.Share) {
-            downloadText(filename, text, mime, noBom);
-            return Promise.resolve('downloaded');
-        }
-
-        // Cache first: it needs no storage permission, and the share sheet
-        // lets the user drop it anywhere they like.
-        return Plugins.Filesystem.writeFile({
-            path: filename,
-            data: body,
-            directory: 'CACHE',
-            encoding: 'utf8'
-        }).then(function (written) {
-            return Plugins.Share.share({
-                title: filename,
-                text: filename,
-                url: written.uri,
-                dialogTitle: 'Save or send ' + filename
-            });
-        }).then(function () {
-            return 'shared';
-        }).catch(function (err) {
-            if (err && /cancel/i.test(String(err.message || err))) return 'cancelled';
-            console.warn('Share failed, falling back to a download:', err);
-            downloadText(filename, text, mime, noBom);
-            return 'downloaded';
-        });
     }
 
     function csvCell(v) {
@@ -1390,9 +1404,13 @@
                     toast('Export cancelled — nothing was saved to a file.', 'bad');
                     return null;
                 }
+                if (how === 'failed') {
+                    toast('Could not save the backup. Nothing was written.', 'bad');
+                    return null;
+                }
                 return S.setMeta('lastExportAt', new Date().toISOString()).then(function () {
-                    toast(how === 'shared'
-                        ? 'Backup shared: ' + name
+                    toast(how === 'shared' ? 'Backup shared: ' + name
+                        : how === 'saved' ? 'Backup saved: ' + name
                         : 'Backup downloaded: ' + name, 'good');
                     renderStorageInfo();
                 });
