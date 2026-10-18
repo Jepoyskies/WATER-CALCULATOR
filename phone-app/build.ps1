@@ -231,6 +231,19 @@ if ($javaSources.Count -eq 0) { Boom "No Java sources found." }
 if ($LASTEXITCODE -ne 0) { Boom "javac failed" }
 Say "ok  ($($javaSources.Count) file)"
 
+# Guard. The d8 that ships with build-tools 34 passes out with an internal
+# NullPointerException on any class that is a non-static inner class - javac
+# names the synthetic reference to the outer class in a MethodParameters
+# attribute and d8 cannot read it. It is a confusing crash from deep inside
+# R8, so check for it here where the message can actually say what to do.
+$innerClasses = @(Get-ChildItem $Classes -Recurse -Filter *.class | Where-Object {
+    [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($_.FullName)).Contains("this`$0")
+})
+if ($innerClasses.Count -gt 0) {
+    $names = ($innerClasses | ForEach-Object { $_.FullName.Substring($Classes.Length + 1) }) -join ", "
+    Boom "These are non-static inner classes, which d8 cannot compile: $names`n   Move them out to their own top-level file, or mark them static."
+}
+
 Step "Building classes.dex"
 
 Push-Location $Build

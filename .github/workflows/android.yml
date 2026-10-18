@@ -57,10 +57,6 @@ jobs:
           echo "build-tools: $(ls "$SDK/build-tools")"
           echo "platforms:   $(ls "$SDK/platforms")"
 
-      - name: Probe d8
-        continue-on-error: true
-        run: bash phone-app/probe.sh
-
       - name: Build
         run: |
           pwsh -NoProfile -File phone-app/build.ps1 \
