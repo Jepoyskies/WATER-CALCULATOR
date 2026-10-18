@@ -18,6 +18,7 @@
         autoBackupHandle: null,
         device: 'unknown',
         modalKey: null,      // customer open in the modal
+        storagePersisted: false,
         dismissedPairs: {},  // lookalike names the user said are different people
         selected: {}         // history checkboxes
     };
@@ -86,13 +87,19 @@
     }
 
     /**
-     * On a phone a plain download lands in a folder nobody can find. If the
-     * phone can share files, offer the share sheet instead so the backup can
-     * go straight to Drive, email, or a chat with yourself.
+     * Picks the best way to hand a file to the user:
+     *
+     *   1. Inside the packaged phone app -> write it with the Filesystem
+     *      plugin and open the Android share sheet. A WebView cannot download
+     *      a blob the way a browser tab can.
+     *   2. A phone browser that can share files -> the share sheet.
+     *   3. Anything else -> an ordinary download.
      *
      * Resolves with 'shared', 'downloaded' or 'cancelled'.
      */
     function shareOrDownload(filename, text, mime, noBom) {
+        if (isNativeApp()) return nativeShare(filename, text, mime, noBom);
+
         var type = mime || 'text/plain';
         var body = noBom ? text : '\uFEFF' + text;
         var file;
@@ -119,6 +126,44 @@
 
         downloadText(filename, text, type, noBom);
         return Promise.resolve('downloaded');
+    }
+
+    function isNativeApp() {
+        return !!(window.Capacitor && window.Capacitor.isNativePlatform &&
+                  window.Capacitor.isNativePlatform());
+    }
+
+    function nativeShare(filename, text, mime, noBom) {
+        var Plugins = (window.Capacitor && window.Capacitor.Plugins) || {};
+        var body = noBom ? text : '\uFEFF' + text;
+
+        if (!Plugins.Filesystem || !Plugins.Share) {
+            downloadText(filename, text, mime, noBom);
+            return Promise.resolve('downloaded');
+        }
+
+        // Cache first: it needs no storage permission, and the share sheet
+        // lets the user drop it anywhere they like.
+        return Plugins.Filesystem.writeFile({
+            path: filename,
+            data: body,
+            directory: 'CACHE',
+            encoding: 'utf8'
+        }).then(function (written) {
+            return Plugins.Share.share({
+                title: filename,
+                text: filename,
+                url: written.uri,
+                dialogTitle: 'Save or send ' + filename
+            });
+        }).then(function () {
+            return 'shared';
+        }).catch(function (err) {
+            if (err && /cancel/i.test(String(err.message || err))) return 'cancelled';
+            console.warn('Share failed, falling back to a download:', err);
+            downloadText(filename, text, mime, noBom);
+            return 'downloaded';
+        });
     }
 
     function csvCell(v) {
@@ -159,6 +204,7 @@
             .then(refreshAll)
             .then(function () { return S.requestPersistence(); })
             .then(function (result) {
+                state.storagePersisted = !!result.persisted;
                 renderStorageBadge(result);
                 return renderStorageInfo(result);
             })
@@ -225,6 +271,26 @@
             badge.className = 'badge warn';
             badge.title = 'Storage is best-effort. Keep exporting backups.';
         }
+    }
+
+    /**
+     * Phones refuse a persistence request that does not come from a tap, so the
+     * one at boot is usually denied. Ask again the first time the user actually
+     * does something - that gesture is what makes Android say yes, and it stops
+     * the system quietly evicting the database when storage gets tight.
+     */
+    var persistenceAsked = false;
+    function askPersistenceAgain() {
+        if (persistenceAsked || state.storagePersisted) return;
+        persistenceAsked = true;
+
+        S.requestPersistence().then(function (result) {
+            state.storagePersisted = !!result.persisted;
+            renderStorageBadge(result);
+            if (result.persisted) {
+                toast('Storage is now persistent - Android will keep your data safe.', 'good');
+            }
+        });
     }
 
     /* =========================================================
@@ -1626,6 +1692,10 @@
     }
 
     function bindEvents() {
+        // The first real tap is our best shot at being granted persistent
+        // storage on a phone, so take it.
+        on(document, 'click', function () { askPersistenceAgain(); });
+
         qsa('.tab').forEach(function (tab) {
             on(tab, 'click', function () { switchView(tab.dataset.view); });
         });

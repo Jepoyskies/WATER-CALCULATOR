@@ -1,0 +1,97 @@
+name: Android APK
+
+# Builds phone-app into an installable APK, and publishes it as a release
+# asset so the phone can download it straight from a normal browser link:
+#
+#   https://github.com/Jepoyskies/WATER-CALCULATOR/releases/latest/download/WaterCalc-1.0.apk
+#
+# The runners already have the Android SDK and a JDK, so this takes a couple
+# of minutes. Nothing needs to be installed on the laptop.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "phone-app/**"
+      - "app.js"
+      - "index.html"
+      - "style.css"
+      - "parser.js"
+      - "store.js"
+      - "manifest.webmanifest"
+      - "icons/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Check the Android SDK has what the build needs
+        run: |
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          echo "SDK is $SDK"
+
+          AAPT2="$SDK/build-tools/34.0.0/aapt2"
+          ANDROID_JAR="$SDK/platforms/android-34/android.jar"
+
+          if [ ! -x "$AAPT2" ] || [ ! -f "$ANDROID_JAR" ]; then
+            MANAGER=$(find "$SDK" -name sdkmanager -type f -path '*cmdline-tools*' | head -n 1)
+            echo "installing with $MANAGER"
+            yes | "$MANAGER" --licenses > /dev/null 2>&1 || true
+            "$MANAGER" --install "build-tools;34.0.0" "platforms;android-34"
+          fi
+
+          echo "build-tools: $(ls "$SDK/build-tools")"
+          echo "platforms:   $(ls "$SDK/platforms")"
+
+      - name: Build
+        run: |
+          pwsh -NoProfile -File phone-app/build.ps1 \
+            -VersionCode ${{ github.run_number }} \
+            -VersionName 1.0
+
+      - name: Check the APK really is an APK
+        run: |
+          APK=$(ls phone-app/dist/*.apk)
+          echo "built $APK"
+          ls -l "$APK"
+          # An APK is a zip, so this proves the pieces are all in it.
+          unzip -l "$APK" | grep -E "classes.dex|resources.arsc|AndroidManifest.xml|assets/www/index.html|assets/www/app.js"
+          unzip -l "$APK" | grep -c "assets/www/" | xargs echo "files under assets/www:"
+
+      - name: Keep a copy on the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: WaterCalc-apk
+          path: phone-app/dist/*.apk
+          if-no-files-found: error
+
+      - name: Publish it for the phone to download
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-latest
+          name: Water Calc APK
+          body: |
+            The whole app in one file - no internet needed after installing.
+
+            **To install:** open this page on the phone and tap the `.apk`
+            below. Android will ask to allow installs from your browser the
+            first time; say yes, then tap Install.
+
+            Your notes, customers and payments are stored inside the app
+            itself, so clearing Chrome cannot touch them.
+          files: phone-app/dist/*.apk
+          make_latest: true

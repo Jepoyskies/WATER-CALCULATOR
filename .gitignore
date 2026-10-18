@@ -1,0 +1,7 @@
+# Output from phone-app/build.ps1 - rebuilt from source every time
+phone-app/build/
+phone-app/dist/
+
+# Python scratch
+__pycache__/
+*.pyc

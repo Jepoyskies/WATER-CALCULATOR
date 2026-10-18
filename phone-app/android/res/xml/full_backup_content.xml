@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android Auto Backup. Without this, clearing the app's data or switching
+  phones would take the whole ledger with it. With it, Android keeps a copy
+  in the user's own Google account and restores it on a new phone.
+
+  domain="root" is the app's private data folder, which is where the WebView
+  keeps its IndexedDB - all the sheets, customers and payments.
+-->
+<full-backup-content>
+    <include domain="root" path="." />
+</full-backup-content>

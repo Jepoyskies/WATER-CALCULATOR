@@ -505,8 +505,10 @@ September 12, 2026 (Saturday)
 
 <script>
 /* Register the service worker so the app opens with no signal.
-   Needs http(s) - it does nothing when you open the file directly. */
+   Needs http(s) - it does nothing when you open the file directly, and
+   nothing inside the packaged phone app, where the files are already local. */
 (function () {
+    if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) return;
     if (!('serviceWorker' in navigator)) return;
     if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
 

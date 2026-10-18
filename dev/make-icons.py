@@ -133,11 +133,86 @@ def png(width, height, raw):
             + chunk(b"IEND", b""))
 
 
-def write(name, size, inset_ratio, radius_ratio):
-    path = os.path.join(OUT, name)
+def write(name, size, inset_ratio, radius_ratio, folder=None):
+    path = os.path.join(folder or OUT, name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as fh:
         fh.write(png(size, size, render(size, inset_ratio, radius_ratio)))
-    print("wrote %-22s %4dx%-4d %6d bytes" % (name, size, size, os.path.getsize(path)))
+    print("wrote %-22s %4dx%-4d %6d bytes" % (path, size, size, os.path.getsize(path)))
+
+
+def drop_mask(size, ss=2):
+    """Alpha 0..1 of the droplet alone, on a transparent field."""
+    cx = cy = size / 2.0
+    r = size * 0.255
+    drop_cy = cy + r * 0.21
+    step = 1.0 / ss
+    total = float(ss * ss)
+
+    mask = [0.0] * (size * size)
+    for y in range(size):
+        base = y * size
+        for x in range(size):
+            hits = 0.0
+            for sy in range(ss):
+                for sx in range(ss):
+                    if droplet(x + (sx + 0.5) * step, y + (sy + 0.5) * step, cx, drop_cy, r):
+                        hits += 1.0
+            mask[base + x] = hits / total
+    return mask
+
+
+def splash(size=2732, logo_ratio=0.42):
+    """
+    Android splash screens are a full square; Capacitor scales and crops it,
+    so the logo sits in the middle and the flat blue goes to the edges.
+    """
+    logo_px = int(size * logo_ratio)
+    mask_size = 800
+    mask = drop_mask(mask_size)
+    scale = mask_size / float(logo_px)
+
+    ox = size / 2.0 - logo_px / 2.0
+    oy = size / 2.0 - logo_px / 2.0
+
+    x0 = max(0, int(ox) - 2)
+    x1 = min(size, int(ox + logo_px) + 2)
+    y0 = max(0, int(oy) - 2)
+    y1 = min(size, int(oy + logo_px) + 2)
+
+    def sample(mx, my):
+        if mx < 0 or my < 0 or mx >= mask_size - 1 or my >= mask_size - 1:
+            return 0.0
+        ix, iy = int(mx), int(my)
+        fx, fy = mx - ix, my - iy
+        a = mask[iy * mask_size + ix]
+        b = mask[iy * mask_size + ix + 1]
+        c = mask[(iy + 1) * mask_size + ix]
+        d = mask[(iy + 1) * mask_size + ix + 1]
+        return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy
+
+    px = []
+    for y in range(size):
+        t = y / float(size - 1)
+        bg = tuple(int(round(BG_TOP[i] + (BG_BOTTOM[i] - BG_TOP[i]) * t)) for i in range(3))
+        row = bytearray(bg + (255,)) * size
+
+        if y0 <= y < y1:
+            my = (y - oy) * scale
+            for x in range(x0, x1):
+                a = sample((x - ox) * scale, my)
+                if a <= 0.002:
+                    continue
+                i = x * 4
+                for c in range(3):
+                    row[i + c] = int(round(row[i + c] * (1 - a) + DROP[c] * a))
+                row[i + 3] = 255
+        px.append(row)
+
+    path = os.path.join(OUT, "splash.png")
+    with open(path, "wb") as fh:
+        fh.write(png(size, size, b"".join(b"\x00" + bytes(r) for r in px)))
+    print("wrote %-22s %4dx%-4d %6d bytes" % (path, size, size, os.path.getsize(path)))
 
 
 def main():
@@ -147,6 +222,10 @@ def main():
     write("maskable-512.png", 512, 0.70, 0.30)
     write("apple-touch-icon.png", 180, 1.0, 0.22)
     write("favicon-64.png", 64, 1.0, 0.20)
+
+    # Android needs a 1024 icon and a square splash
+    write("icon-1024.png", 1024, 1.0, 0.22)
+    splash()
 
 
 if __name__ == "__main__":
