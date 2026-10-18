@@ -405,6 +405,18 @@ code {
     body { padding: 10px; }
     .app { padding: 15px; border-radius: 8px; }
     .app-header h1 { font-size: 1.25rem; }
+
+    /* Wrap the tab bar instead of scrolling, so no tab is ever hidden */
+    .tabs { flex-wrap: wrap; overflow-x: visible; gap: 2px; margin: 14px 0; }
+    .tab { padding: 9px 10px; font-size: 0.84rem; gap: 4px; }
+
+    /* 16px inputs stop iOS from zooming in when you tap a field */
+    .form-grid input, .form-grid select, #quick-add input,
+    .qa-chips input, #mf-name, #mf-amount, #mf-date, #mf-note, #device-input {
+        font-size: 16px;
+    }
+    #raw-log { font-size: 16px; }
+
     .summary-cards { grid-template-columns: 1fr 1fr; gap: 10px; }
     .card { padding: 12px 8px; }
     .card p { font-size: 1.15rem; }
