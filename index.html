@@ -3,76 +3,457 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Water Delivery Calculator</title>
+    <title>Water Delivery Manager</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<div class="calc-container">
-    <header>
-        <h1>💧 Water Delivery Calculator</h1>
-        <p>Paste your raw daily notes below to auto-calculate totals.</p>
+<div class="app">
+
+    <header class="app-header">
+        <div>
+            <h1>💧 Water Delivery Manager</h1>
+            <p id="header-sub">Paste your delivery notes. Trips, utang and gallons are worked out for you.</p>
+        </div>
+        <div class="header-meta">
+            <span id="storage-badge" class="badge" title="Where your data is saved">…</span>
+            <span id="today-badge" class="badge ghost"></span>
+        </div>
     </header>
 
-    <div class="input-section">
-        <textarea id="raw-log" rows="12" placeholder="Paste your raw notes here... Example:
-Expenses - 1430
-100 breakfast
+    <nav class="tabs" id="tabs">
+        <button class="tab is-active" data-view="entry">📝 Entry</button>
+        <button class="tab" data-view="dashboard">📊 Dashboard</button>
+        <button class="tab" data-view="customers">👥 Utang <span id="utang-pill" class="pill hidden">0</span></button>
+        <button class="tab" data-view="history">📅 History</button>
+        <button class="tab" data-view="backup">💾 Backup</button>
+    </nav>
 
-34R (1st trip)
-1 return
-25x34"></textarea>
+    <!-- ============================================================
+         ENTRY
+         ============================================================ -->
+    <section id="view-entry" class="view is-active">
+
+        <div class="toolbar">
+            <button id="new-day-btn" class="btn primary">▶ Start New Day</button>
+            <button id="load-last-btn" class="btn ghost">↺ Load Last Saved</button>
+            <button id="editor-toggle" class="btn ghost right">🎯 Quick Add</button>
+        </div>
+
+        <div id="quick-add" class="quick-add hidden">
+            <div class="qa-head">
+                <strong>Tap a name to drop a line into your notes</strong>
+                <span class="muted">It inserts a <code>0</code> you can type over.</span>
+            </div>
+            <div class="qa-chips">
+                <button class="chip" data-target="creditsToday" data-name="__new__">＋ New utang given</button>
+                <button class="chip" data-target="creditsPaid" data-name="__new__">＋ Payment received</button>
+                <span id="qa-customer-chips"></span>
+            </div>
+        </div>
+
+        <div id="carry-note" class="notice info hidden"></div>
+        <div id="draft-note" class="notice warn hidden"></div>
+
+        <textarea id="raw-log" rows="18" spellcheck="false"
+            placeholder="Paste your delivery notes here. Example:
+
+Expenses
+
+100 load
+200 food
+
+Credits Paid
+200 ricky
+75 nene
+
+Credits today
+125 oscar
+
+Remaining
+Berto 50
+540 mang tony
+100 lito
+
+September 12, 2026 (Saturday)
+1st trip
+35R
+4 return
+25x23
+20x8"></textarea>
+
         <div class="actions">
-            <button id="calc-btn" class="btn primary">Calculate Totals</button>
+            <button id="calc-btn" class="btn primary">Calculate</button>
+            <button id="save-btn" class="btn success">💾 Save Sheet</button>
             <button id="clear-btn" class="btn secondary">Clear</button>
         </div>
-    </div>
 
-    <!-- Results Dashboard (Hidden by default) -->
-    <div id="results-dashboard" class="hidden">
-        <div class="dashboard-header">
-            <h2 id="display-date">Summary</h2>
-            <button id="export-btn" class="btn small">📋 Copy Summary</button>
+        <div id="tripwarn-box" class="notice warn hidden">
+            <strong>⚠️ Loaded gallons do not add up</strong>
+            <div class="muted">loaded should equal sold + returned + bahay</div>
+            <ul id="tripwarn-list"></ul>
         </div>
 
-        <div class="summary-cards">
-            <div class="card">
-                <h3>Total Revenue</h3>
-                <p id="out-revenue" class="text-blue">₱0</p>
-                <small id="out-gallons">0 gallons sold</small>
+        <div id="rollforward-box" class="notice warn hidden">
+            <strong>⚠️ A balance does not roll forward from last time</strong>
+            <ul id="rollforward-list"></ul>
+        </div>
+
+        <div id="unparsed-box" class="notice warn hidden">
+            <strong>⚠️ These lines were not counted</strong>
+            <ul id="unparsed-list"></ul>
+        </div>
+
+        <div id="stated-box" class="notice info hidden">
+            <strong>ℹ️ You wrote a total that differs from the lines</strong>
+            <ul id="stated-list"></ul>
+        </div>
+
+        <!-- Results -->
+        <div id="results-dashboard" class="hidden">
+            <div class="dashboard-header">
+                <h2 id="display-date">Summary</h2>
+                <div class="header-actions">
+                    <button id="export-btn" class="btn small">📋 Copy Summary</button>
+                    <button id="csv-day-btn" class="btn small">⬇️ Text</button>
+                </div>
             </div>
-            <div class="card">
-                <h3>Expenses</h3>
-                <p id="out-expenses" class="text-red">₱0</p>
-                <small id="warn-expenses" class="warning hidden">Stated: ₱<span></span></small>
+
+            <div class="summary-cards">
+                <div class="card">
+                    <h3>Total Revenue</h3>
+                    <p id="out-revenue" class="text-blue">₱0</p>
+                    <small id="out-gallons">0 gallons sold</small>
+                </div>
+                <div class="card">
+                    <h3>Expenses</h3>
+                    <p id="out-expenses" class="text-red">₱0</p>
+                    <small id="warn-expenses" class="warning hidden">Stated: ₱<span></span></small>
+                </div>
+                <div class="card">
+                    <h3>New Utang</h3>
+                    <p id="out-credits-today-card" class="text-orange">₱0</p>
+                    <small>given to customers</small>
+                </div>
+                <div class="card">
+                    <h3>Utang Collected</h3>
+                    <p id="out-credits-paid" class="text-green">₱0</p>
+                    <small>paid back to you</small>
+                </div>
+                <div class="card highlight">
+                    <h3>Net Cash Flow</h3>
+                    <p id="out-net" class="text-bold">₱0</p>
+                    <small>Revenue + Collected − Expenses − New Utang</small>
+                </div>
             </div>
-            <div class="card">
-                <h3>Credits Paid</h3>
-                <p id="out-credits-paid" class="text-green">₱0</p>
+
+            <div id="written-total-note" class="notice hidden"></div>
+
+            <div class="details-section">
+                <div class="detail-col">
+                    <h3>🧾 Trips</h3>
+                    <ul id="trip-list" class="clean-list"></ul>
+                </div>
+                <div class="detail-col">
+                    <h3>📝 Totals</h3>
+                    <ul class="clean-list">
+                        <li><strong>Loaded gallons</strong> <span id="out-load"></span></li>
+                        <li><strong>Borrowed back</strong> <span id="out-returned"></span></li>
+                        <li><strong>Returned may laman</strong> <span id="out-fullload"></span></li>
+                        <li><strong>Delivered to bahay</strong> <span id="out-bahay"></span></li>
+                        <li><strong>Still owed to you</strong> <span>₱<span id="out-all-utang">0</span></span></li>
+                        <li><strong>Change you owe</strong> <span>₱<span id="out-change">0</span></span></li>
+                        <li><strong>Gallons borrowed out</strong> <span id="out-borrowed">0</span></li>
+                    </ul>
+                </div>
             </div>
-            <div class="card highlight">
-                <h3>Net Cash Flow</h3>
-                <p id="out-net" class="text-bold">₱0</p>
-                <small>Rev + Credits Paid - Credits Today - Exp</small>
+
+            <div class="details-section" id="day-breakdown-wrap">
+                <div class="detail-col wide">
+                    <h3>📅 Day by Day</h3>
+                    <div class="table-scroll">
+                        <table class="table" id="day-table">
+                            <thead>
+                                <tr><th>Date</th><th class="num">Gallons</th><th class="num">Revenue</th>
+                                <th class="num">Loaded</th><th class="num">Returned</th><th class="num">Bahay</th></tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============================================================
+         DASHBOARD
+         ============================================================ -->
+    <section id="view-dashboard" class="view">
+        <div class="dashboard-header">
+            <h2>Business Overview</h2>
+            <button id="refresh-dash-btn" class="btn small">🔄 Refresh</button>
+        </div>
+
+        <div class="summary-cards" id="biz-cards"></div>
+
+        <div class="details-section">
+            <div class="detail-col">
+                <h3>📅 Recent Sheets</h3>
+                <ul id="recent-days" class="clean-list"></ul>
+            </div>
+            <div class="detail-col">
+                <h3>👥 Who Owes You Most</h3>
+                <ul id="top-utang" class="clean-list"></ul>
             </div>
         </div>
 
         <div class="details-section">
             <div class="detail-col">
-                <h3>🧾 Trip Breakdown</h3>
-                <ul id="trip-list" class="clean-list"></ul>
+                <h3>💵 Change You Owe</h3>
+                <ul id="change-list" class="clean-list"></ul>
             </div>
             <div class="detail-col">
-                <h3>📝 Credits Overview</h3>
-                <ul class="clean-list">
-                    <li><strong>Credits Today:</strong> ₱<span id="out-credits-today">0</span></li>
-                    <li><strong>Remaining Credits:</strong> ₱<span id="out-rem-credits">0</span></li>
-                </ul>
+                <h3>🛢️ Gallons Borrowed From You</h3>
+                <ul id="borrowed-list" class="clean-list"></ul>
             </div>
+        </div>
+
+        <div class="details-section">
+            <div class="detail-col wide">
+                <h3>📆 Monthly Totals</h3>
+                <div class="table-scroll">
+                    <table class="table" id="month-table">
+                        <thead>
+                            <tr><th>Month</th><th class="num">Sheets</th><th class="num">Gallons</th>
+                            <th class="num">Revenue</th><th class="num">Expenses</th>
+                            <th class="num">Collected</th><th class="num">New Utang</th><th class="num">Net</th></tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============================================================
+         CUSTOMERS
+         ============================================================ -->
+    <section id="view-customers" class="view">
+        <div class="dashboard-header">
+            <h2>Utang Ledger</h2>
+            <button id="add-credit-btn" class="btn small">＋ Record Manually</button>
+        </div>
+
+        <div id="manual-form" class="panel hidden">
+            <h3>Record a credit or payment by hand</h3>
+            <p class="muted">Use this when someone pays you on a day you did not write notes.</p>
+            <div class="form-grid">
+                <label>Customer name
+                    <input type="text" id="mf-name" placeholder="tito marvin" list="customer-names">
+                    <datalist id="customer-names"></datalist>
+                </label>
+                <label>Type
+                    <select id="mf-type">
+                        <option value="paid">They paid me (utang goes down)</option>
+                        <option value="given">I gave new utang (utang goes up)</option>
+                    </select>
+                </label>
+                <label>Amount (₱)
+                    <input type="number" id="mf-amount" min="0" step="0.01" placeholder="225">
+                </label>
+                <label>Date
+                    <input type="date" id="mf-date">
+                </label>
+                <label class="full">Note (optional)
+                    <input type="text" id="mf-note" placeholder="cash payment">
+                </label>
+            </div>
+            <div class="actions">
+                <button id="mf-save" class="btn success">Save</button>
+                <button id="mf-cancel" class="btn secondary">Cancel</button>
+            </div>
+        </div>
+
+        <div class="summary-cards" id="ledger-cards"></div>
+
+        <div id="missing-box" class="notice warn hidden">
+            <strong>❓ These people were on your last Remaining list but not on the newest one</strong>
+            <div class="muted">They either paid up, or you forgot to carry them over.</div>
+            <ul id="missing-list"></ul>
+        </div>
+
+        <div id="rollforward-box2" class="notice warn hidden">
+            <strong>⚠️ These balances did not roll forward correctly</strong>
+            <div class="muted">Previous balance + new utang − collected should equal the new balance.</div>
+            <ul id="rollforward-list2"></ul>
+        </div>
+
+        <div class="table-scroll">
+            <table class="table clickable" id="customers-table">
+                <thead>
+                    <tr><th>Customer</th><th class="num">Owes Now</th>
+                    <th class="num">Utang Given (all time)</th><th class="num">Paid Back (all time)</th>
+                    <th>Balance As Of</th></tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+        <p class="muted" id="ledger-empty">No customers yet. Add a name under <code>Remaining</code>, like
+            <code>540 mang tony</code>.</p>
+    </section>
+
+    <!-- ============================================================
+         HISTORY
+         ============================================================ -->
+    <section id="view-history" class="view">
+        <div class="dashboard-header">
+            <h2>Saved Sheets</h2>
+            <div class="header-actions">
+                <button id="refresh-history-btn" class="btn small">🔄 Refresh</button>
+            </div>
+        </div>
+
+        <div class="toolbar" id="combine-bar">
+            <span class="muted" id="combine-hint">Tick two or more sheets to combine them into one total.</span>
+            <button id="combine-btn" class="btn primary small" disabled>🔗 Combine selected</button>
+            <button id="uncombine-btn" class="btn ghost small">↩️ Undo a combine</button>
+        </div>
+
+        <div class="table-scroll">
+            <table class="table" id="history-table">
+                <thead>
+                    <tr>
+                        <th></th><th>Dates</th><th class="num">Gallons</th><th class="num">Revenue</th>
+                        <th class="num">Expenses</th><th class="num">Collected</th>
+                        <th class="num">New Utang</th><th class="num">Remaining</th>
+                        <th class="num">Net</th><th></th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+        <p class="muted" id="history-empty">Nothing saved yet. Write your notes in the Entry tab and press
+            <strong>Save Sheet</strong>.</p>
+    </section>
+
+    <!-- ============================================================
+         BACKUP
+         ============================================================ -->
+    <section id="view-backup" class="view">
+        <div class="dashboard-header">
+            <h2>Backup &amp; Transfer</h2>
+        </div>
+
+        <div class="notice info">
+            <strong>📱 Moving between your laptop and phone</strong>
+            <div>Enter the day on your phone, tap <strong>Export Backup</strong>, send yourself the file,
+                 then open this app on the laptop and tap <strong>Import</strong>. Nothing is ever overwritten —
+                 only newer copies win.</div>
+        </div>
+
+        <div class="panel">
+            <h3>🛡️ Keep your data safe</h3>
+            <p class="muted">
+                Everything lives in a real database inside this browser. Clearing browser data will erase it,
+                so export a backup regularly — especially before updating your browser or changing computers.
+            </p>
+            <div class="actions">
+                <button id="export-json-btn" class="btn primary">⬇️ Export Backup (.json)</button>
+                <button id="import-json-btn" class="btn secondary">⬆️ Import from another device</button>
+            </div>
+            <input type="file" id="import-file" accept=".json,application/json" class="hidden">
+
+            <div class="autobackup">
+                <h4>🔁 Automatic file backup <span id="ab-state" class="badge ghost">off</span></h4>
+                <p class="muted" id="ab-help">
+                    Pick a file once and the app rewrites it every time you save, so a copy always exists
+                    outside the browser.
+                </p>
+                <div class="actions">
+                    <button id="ab-enable" class="btn small">Choose backup file…</button>
+                    <button id="ab-run" class="btn small">Backup now</button>
+                    <button id="ab-disable" class="btn small">Turn off</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h3>💻 Storage status</h3>
+            <ul class="clean-list" id="storage-info"></ul>
+            <div class="actions">
+                <button id="persist-btn" class="btn small">🔒 Ask browser to keep data permanently</button>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h3>📤 Spreadsheet export</h3>
+            <div class="actions">
+                <button id="csv-sheets-btn" class="btn small">Sheets (.csv)</button>
+                <button id="csv-trips-btn" class="btn small">Trips (.csv)</button>
+                <button id="csv-utang-btn" class="btn small">Utang ledger (.csv)</button>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h3>🏷️ This device</h3>
+            <p class="muted">Shown on backups so you know where a file came from.</p>
+            <div class="form-grid">
+                <label>Device name
+                    <input type="text" id="device-input" placeholder="Laptop">
+                </label>
+            </div>
+            <div class="actions">
+                <button id="device-save" class="btn small">Save name</button>
+            </div>
+        </div>
+
+        <div class="panel danger">
+            <h3>⚠️ Danger zone</h3>
+            <p class="muted">Deletes every saved sheet and customer on this device. Export first!</p>
+            <div class="actions">
+                <button id="wipe-btn" class="btn danger">Erase all data</button>
+            </div>
+        </div>
+    </section>
+
+    <footer class="app-footer">
+        <span id="footer-note" class="muted"></span>
+    </footer>
+</div>
+
+<!-- Customer detail modal -->
+<div id="modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal">
+        <div class="modal-head">
+            <h3 id="modal-title">Customer</h3>
+            <button id="modal-close" class="btn small">✕</button>
+        </div>
+        <div class="modal-body" id="modal-body"></div>
+        <div class="modal-foot">
+            <button id="modal-quickpay" class="btn success small">💰 Record payment</button>
+            <button id="modal-close-2" class="btn secondary small">Close</button>
         </div>
     </div>
 </div>
 
+<!-- Undo combine modal -->
+<div id="uncombine-backdrop" class="modal-backdrop hidden">
+    <div class="modal">
+        <div class="modal-head">
+            <h3>Undo a combine</h3>
+            <button id="uncombine-close" class="btn small">✕</button>
+        </div>
+        <div class="modal-body">
+            <p class="muted">Pick the combined sheet to split back into its original days.</p>
+            <ul class="clean-list" id="uncombine-list"></ul>
+        </div>
+    </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="parser.js"></script>
+<script src="store.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -1,0 +1,886 @@
+/* ============================================================
+   store.js  (v2)
+   Local database for the Water Delivery Manager.
+
+   Design
+   ------
+   Everything important is derived from the saved sheets, so the
+   database can never drift out of sync with itself.
+
+     sheets    - one record per saved notes page (may span days)
+     manual    - credits/payments recorded by hand, outside a sheet
+     customers - name registry
+     meta      - settings (device name, backup handle, timestamps)
+
+   Customer balances come from the "Remaining" snapshot in the newest
+   sheet that has one - which is exactly how the notes are written.
+
+   Primary engine  : IndexedDB
+   Fallback engine : localStorage
+   Exposes window.WCStore
+   ============================================================ */
+(function (global) {
+    'use strict';
+
+    var DB_NAME = 'watercalc';
+    var DB_VERSION = 2;
+    var LS_PREFIX = 'wc_db_v2:';
+    var SCHEMA_VERSION = 2;
+
+    var STORES = ['sheets', 'manual', 'customers', 'meta'];
+
+    var engine = null;
+    var dbPromise = null;
+
+    /* =========================================================
+       IndexedDB
+       ========================================================= */
+
+    function openIDB() {
+        if (dbPromise) return dbPromise;
+
+        dbPromise = new Promise(function (resolve, reject) {
+            if (!global.indexedDB) { reject(new Error('IndexedDB is not available')); return; }
+
+            var req;
+            try { req = global.indexedDB.open(DB_NAME, DB_VERSION); }
+            catch (e) { reject(e); return; }
+
+            req.onupgradeneeded = function () {
+                var db = req.result;
+                if (!db.objectStoreNames.contains('sheets')) {
+                    var s = db.createObjectStore('sheets', { keyPath: 'id' });
+                    s.createIndex('startDateKey', 'startDateKey', { unique: false });
+                }
+                if (!db.objectStoreNames.contains('manual')) {
+                    db.createObjectStore('manual', { keyPath: 'id' });
+                }
+                if (!db.objectStoreNames.contains('customers')) {
+                    db.createObjectStore('customers', { keyPath: 'key' });
+                }
+                if (!db.objectStoreNames.contains('meta')) {
+                    db.createObjectStore('meta', { keyPath: 'key' });
+                }
+            };
+
+            req.onsuccess = function () { resolve(req.result); };
+            req.onerror = function () { reject(req.error || new Error('IndexedDB open failed')); };
+            req.onblocked = function () { reject(new Error('IndexedDB is blocked by another tab')); };
+        });
+
+        return dbPromise;
+    }
+
+    function reqDone(request) {
+        return new Promise(function (resolve, reject) {
+            request.onsuccess = function () { resolve(request.result); };
+            request.onerror = function () { reject(request.error); };
+        });
+    }
+
+    function txDone(tx) {
+        return new Promise(function (resolve, reject) {
+            tx.oncomplete = function () { resolve(); };
+            tx.onerror = function () { reject(tx.error); };
+            tx.onabort = function () { reject(tx.error || new Error('Transaction aborted')); };
+        });
+    }
+
+    var idbEngine = {
+        label: 'IndexedDB',
+        getAll: function (store) {
+            return openIDB().then(function (db) {
+                return reqDone(db.transaction(store, 'readonly').objectStore(store).getAll());
+            });
+        },
+        get: function (store, key) {
+            return openIDB().then(function (db) {
+                return reqDone(db.transaction(store, 'readonly').objectStore(store).get(key));
+            });
+        },
+        put: function (store, value) {
+            return openIDB().then(function (db) {
+                var tx = db.transaction(store, 'readwrite');
+                tx.objectStore(store).put(value);
+                return txDone(tx);
+            });
+        },
+        putMany: function (store, values) {
+            if (!values.length) return Promise.resolve();
+            return openIDB().then(function (db) {
+                var tx = db.transaction(store, 'readwrite');
+                var os = tx.objectStore(store);
+                values.forEach(function (v) { os.put(v); });
+                return txDone(tx);
+            });
+        },
+        del: function (store, key) {
+            return openIDB().then(function (db) {
+                var tx = db.transaction(store, 'readwrite');
+                tx.objectStore(store).delete(key);
+                return txDone(tx);
+            });
+        },
+        delMany: function (store, keys) {
+            if (!keys.length) return Promise.resolve();
+            return openIDB().then(function (db) {
+                var tx = db.transaction(store, 'readwrite');
+                var os = tx.objectStore(store);
+                keys.forEach(function (k) { os.delete(k); });
+                return txDone(tx);
+            });
+        },
+        batch: function (ops) {
+            if (!ops || !ops.length) return Promise.resolve();
+            return openIDB().then(function (db) {
+                var names = [];
+                ops.forEach(function (op) {
+                    if (names.indexOf(op.store) === -1) names.push(op.store);
+                });
+                var tx = db.transaction(names, 'readwrite');
+                ops.forEach(function (op) {
+                    var os = tx.objectStore(op.store);
+                    if (op.type === 'put') os.put(op.value);
+                    else if (op.type === 'putMany') op.values.forEach(function (v) { os.put(v); });
+                    else if (op.type === 'del') os.delete(op.key);
+                    else if (op.type === 'delMany') op.keys.forEach(function (k) { os.delete(k); });
+                    else if (op.type === 'clear') os.clear();
+                });
+                return txDone(tx);
+            });
+        },
+        clearAll: function () {
+            return openIDB().then(function (db) {
+                var tx = db.transaction(STORES, 'readwrite');
+                STORES.forEach(function (s) { tx.objectStore(s).clear(); });
+                return txDone(tx);
+            });
+        }
+    };
+
+    /* =========================================================
+       localStorage fallback
+       ========================================================= */
+
+    function lsRead(store) {
+        try {
+            var raw = global.localStorage.getItem(LS_PREFIX + store);
+            return raw ? JSON.parse(raw) : [];
+        } catch (e) { return []; }
+    }
+    function lsWrite(store, rows) {
+        global.localStorage.setItem(LS_PREFIX + store, JSON.stringify(rows));
+    }
+    function lsKeyOf(store, row) { return store === 'meta' || store === 'customers' ? row.key : row.id; }
+
+    var lsEngine = {
+        label: 'localStorage',
+        getAll: function (store) { return Promise.resolve(lsRead(store)); },
+        get: function (store, key) {
+            return Promise.resolve(lsRead(store).filter(function (r) {
+                return lsKeyOf(store, r) === key;
+            })[0] || null);
+        },
+        put: function (store, value) {
+            var rows = lsRead(store);
+            var k = lsKeyOf(store, value);
+            var i = rows.findIndex(function (r) { return lsKeyOf(store, r) === k; });
+            if (i >= 0) rows[i] = value; else rows.push(value);
+            lsWrite(store, rows);
+            return Promise.resolve();
+        },
+        putMany: function (store, values) {
+            return values.reduce(function (chain, v) {
+                return chain.then(function () { return lsEngine.put(store, v); });
+            }, Promise.resolve());
+        },
+        del: function (store, key) {
+            lsWrite(store, lsRead(store).filter(function (r) { return lsKeyOf(store, r) !== key; }));
+            return Promise.resolve();
+        },
+        delMany: function (store, keys) {
+            lsWrite(store, lsRead(store).filter(function (r) {
+                return keys.indexOf(lsKeyOf(store, r)) === -1;
+            }));
+            return Promise.resolve();
+        },
+        batch: function (ops) {
+            return ops.reduce(function (chain, op) {
+                return chain.then(function () {
+                    if (op.type === 'put') return lsEngine.put(op.store, op.value);
+                    if (op.type === 'putMany') return lsEngine.putMany(op.store, op.values);
+                    if (op.type === 'del') return lsEngine.del(op.store, op.key);
+                    if (op.type === 'delMany') return lsEngine.delMany(op.store, op.keys);
+                    if (op.type === 'clear') { lsWrite(op.store, []); return Promise.resolve(); }
+                });
+            }, Promise.resolve());
+        },
+        clearAll: function () {
+            STORES.forEach(function (s) { lsWrite(s, []); });
+            return Promise.resolve();
+        }
+    };
+
+    /* =========================================================
+       Bootstrap
+       ========================================================= */
+
+    function open() {
+        if (engine) return Promise.resolve(engine);
+
+        return openIDB()
+            .then(function () { return idbEngine.put('meta', { key: '__probe', value: Date.now() }); })
+            .then(function () { engine = idbEngine; return engine; })
+            .catch(function () { engine = lsEngine; return engine; });
+    }
+
+    function E() { return engine || lsEngine; }
+    function engineName() { return engine ? engine.label : 'not initialized'; }
+
+    /* =========================================================
+       Storage health
+       ========================================================= */
+
+    function requestPersistence() {
+        if (!global.navigator || !navigator.storage || !navigator.storage.persist) {
+            return Promise.resolve({ supported: false, persisted: false });
+        }
+        return navigator.storage.persisted()
+            .then(function (already) { return already ? true : navigator.storage.persist(); })
+            .then(function (persisted) { return { supported: true, persisted: persisted }; })
+            .catch(function () { return { supported: true, persisted: false }; });
+    }
+
+    function estimate() {
+        if (!global.navigator || !navigator.storage || !navigator.storage.estimate) return Promise.resolve(null);
+        return navigator.storage.estimate()
+            .then(function (e) { return { usage: e.usage || 0, quota: e.quota || 0 }; })
+            .catch(function () { return null; });
+    }
+
+    /* =========================================================
+       Meta
+       ========================================================= */
+
+    function getMeta(key, fallback) {
+        return E().get('meta', key).then(function (row) {
+            return row ? row.value : (fallback === undefined ? null : fallback);
+        });
+    }
+    function setMeta(key, value) { return E().put('meta', { key: key, value: value }); }
+
+    /* =========================================================
+       Sheets
+       ========================================================= */
+
+    function listSheets() {
+        return E().getAll('sheets').then(function (rows) {
+            return rows
+                .filter(function (r) { return !r.mergedInto; })
+                .sort(function (a, b) {
+                    return String(b.startDateKey || b.id).localeCompare(String(a.startDateKey || a.id));
+                });
+        });
+    }
+
+    function getAllSheets() {
+        return E().getAll('sheets').then(function (rows) {
+            return rows.sort(function (a, b) {
+                return String(a.startDateKey || a.id).localeCompare(String(b.startDateKey || b.id));
+            });
+        });
+    }
+
+    function getSheet(id) { return E().get('sheets', id); }
+
+    function saveSheet(sheet) {
+        return open().then(function () {
+            return E().put('sheets', sheet);
+        });
+    }
+
+    function deleteSheet(id) {
+        return E().del('sheets', id);
+    }
+
+    /**
+     * Merges several sheets into one combined record.
+     * The originals are kept but flagged, so this can be undone.
+     */
+    function combineSheets(ids) {
+        if (!ids || ids.length < 2) return Promise.reject(new Error('Pick at least two sheets to combine'));
+
+        var P = global.WCParser;
+
+        return Promise.all(ids.map(getSheet)).then(function (sheets) {
+            sheets = sheets.filter(Boolean);
+            if (sheets.length < 2) throw new Error('Could not find those sheets');
+
+            sheets.sort(function (a, b) {
+                return String(a.startDateKey).localeCompare(String(b.startDateKey));
+            });
+
+            var dateKeys = [];
+            var trips = [];
+            var days = [];
+
+            sheets.forEach(function (s) {
+                (s.dateKeys || [s.startDateKey]).forEach(function (k) {
+                    if (dateKeys.indexOf(k) === -1) dateKeys.push(k);
+                });
+                var parsed = s.parsed || {};
+                trips = trips.concat(parsed.trips || []);
+                (parsed.days || []).forEach(function (d) {
+                    var existing = null;
+                    days.forEach(function (x) { if (x.dateKey === d.dateKey) existing = x; });
+                    if (existing) existing.trips = existing.trips.concat(d.trips);
+                    else days.push({ dateKey: d.dateKey, label: d.label, trips: d.trips.slice() });
+                });
+            });
+
+            dateKeys.sort();
+            days.sort(function (a, b) { return String(a.dateKey).localeCompare(String(b.dateKey)); });
+
+            // Expenses / credits are summed, remaining uses the newest snapshot
+            var last = sheets[sheets.length - 1];
+            var first = sheets[0];
+
+            function sumSection(key) {
+                var section = { items: [], named: [], total: 0, statedTotal: null };
+                sheets.forEach(function (s) {
+                    var sec = (s.parsed || {})[key];
+                    if (!sec) return;
+                    section.items = section.items.concat(sec.items || []);
+                    section.named = section.named.concat(sec.named || []);
+                });
+                section.total = section.items.reduce(function (a, i) { return a + i.amount; }, 0);
+                return section;
+            }
+
+            var merged = {
+                dateKeys: dateKeys,
+                dateLabel: P.prettyDate(dateKeys[0]),
+                dateKey: dateKeys[0],
+                expenses: sumSection('expenses'),
+                creditsToday: sumSection('creditsToday'),
+                creditsPaid: sumSection('creditsPaid'),
+                remaining: (last.parsed && last.parsed.remaining) || { items: [], named: [], total: 0, statedTotal: null },
+                remainingSnapshot: (last.parsed && last.parsed.remainingSnapshot) || [],
+                change: (last.parsed && last.parsed.change) || { items: [], named: [], total: 0, statedTotal: null },
+                borrowed: [],
+                days: days,
+                trips: trips,
+                ledger: sheets.reduce(function (acc, s) {
+                    return acc.concat((s.parsed && s.parsed.ledger) || []);
+                }, []),
+                writtenTotal: sheets.reduce(function (acc, s) {
+                    return (s.parsed && s.parsed.writtenTotal) != null ? s.parsed.writtenTotal : acc;
+                }, null),
+                unparsed: [],
+                warnings: []
+            };
+
+            // Borrowed gallons: newest sheet wins per name
+            var borrowedMap = {};
+            sheets.forEach(function (s) {
+                ((s.parsed && s.parsed.borrowed) || []).forEach(function (b) {
+                    borrowedMap[P.customerKeyOf(b.name)] = b;
+                });
+            });
+            merged.borrowed = Object.keys(borrowedMap).map(function (k) { return borrowedMap[k]; });
+
+            trips.forEach(function (t) {
+                t.sold = t.sold || 0;
+                t.returnedGallons = t.returnedGallons || 0;
+                t.bahay = t.bahay || 0;
+            });
+
+            merged.totals = P.calculateTotals(merged);
+
+            var now = new Date().toISOString();
+
+            // The id must not collide with any sheet it was built from,
+            // otherwise writing the "mergedInto" markers would overwrite it.
+            var recordId = 'combo:' + dateKeys[0] + '..' + dateKeys[dateKeys.length - 1];
+            sheets.forEach(function (s) {
+                if (s.id === recordId) recordId = recordId + '+';
+            });
+
+            var record = {
+                id: recordId,
+                startDateKey: dateKeys[0],
+                endDateKey: dateKeys[dateKeys.length - 1],
+                dateKeys: dateKeys,
+                label: dateKeys.length > 1
+                    ? 'Combined ' + P.prettyDate(dateKeys[0]) + ' – ' + P.prettyDate(dateKeys[dateKeys.length - 1])
+                    : 'Combined ' + P.prettyDate(dateKeys[0]),
+                combined: true,
+                combinedFrom: sheets.map(function (s) { return s.id; }),
+                rawText: sheets.map(function (s) {
+                    return '# ' + P.prettyDate(s.startDateKey) + '\n' + (s.rawText || '');
+                }).join('\n\n'),
+                parsed: merged,
+                totals: merged.totals,
+                sourceDevice: first.sourceDevice,
+                createdAt: now,
+                updatedAt: now
+            };
+
+            var ops = [{ type: 'put', store: 'sheets', value: record }];
+            sheets.forEach(function (s) {
+                var copy = JSON.parse(JSON.stringify(s));
+                copy.mergedInto = record.id;
+                copy.updatedAt = now;
+                ops.push({ type: 'put', store: 'sheets', value: copy });
+            });
+
+            return E().batch(ops).then(function () { return record; });
+        });
+    }
+
+    /** Undo a combine: clears the flags and removes the combined record. */
+    function uncombineSheets(id) {
+        return getSheet(id).then(function (record) {
+            if (!record || !record.combinedFrom) throw new Error('That is not a combined sheet');
+
+            return E().getAll('sheets').then(function (all) {
+                var ops = [{ type: 'del', store: 'sheets', key: id }];
+                all.forEach(function (s) {
+                    if (s.mergedInto === id) {
+                        var copy = JSON.parse(JSON.stringify(s));
+                        delete copy.mergedInto;
+                        copy.updatedAt = new Date().toISOString();
+                        ops.push({ type: 'put', store: 'sheets', value: copy });
+                    }
+                });
+                return E().batch(ops);
+            });
+        });
+    }
+
+    /* =========================================================
+       Manual entries (credits / payments recorded by hand)
+       ========================================================= */
+
+    function listManual() {
+        return E().getAll('manual').then(function (rows) {
+            return rows.sort(function (a, b) { return String(a.dateKey).localeCompare(String(b.dateKey)); });
+        });
+    }
+
+    function addManual(entry) {
+        var record = {
+            id: 'm-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+            dateKey: entry.dateKey || global.WCParser.todayKey(),
+            customerKey: entry.customerKey,
+            customerName: entry.customerName,
+            type: entry.type,
+            amount: Math.abs(Number(entry.amount) || 0),
+            note: entry.note || '',
+            updatedAt: new Date().toISOString()
+        };
+
+        return open()
+            .then(function () { return E().put('manual', record); })
+            .then(function () { return touchCustomer(entry.customerKey, entry.customerName); })
+            .then(function () { return record; });
+    }
+
+    function deleteManual(id) { return E().del('manual', id); }
+
+    function touchCustomer(key, name) {
+        if (!key) return Promise.resolve();
+        return E().get('customers', key).then(function (existing) {
+            if (existing) return null;
+            return E().put('customers', { key: key, name: name, createdAt: new Date().toISOString() });
+        });
+    }
+
+    function listCustomers() { return E().getAll('customers'); }
+
+    /** Adds any names we have not seen before. Existing rows are untouched. */
+    function registerCustomers(rows) {
+        if (!rows || !rows.length) return Promise.resolve();
+        return E().getAll('customers').then(function (existing) {
+            var known = {};
+            existing.forEach(function (c) { known[c.key] = true; });
+            var fresh = rows.filter(function (r) { return r.key && !known[r.key]; });
+            return E().putMany('customers', fresh);
+        });
+    }
+
+    /* =========================================================
+       Derived view: balances and ledgers
+       ========================================================= */
+
+    /**
+     * Reads the sheet history the way the notes are written:
+     * the newest sheet with a "Remaining" list defines who owes what.
+     *
+     * Returns {
+     *   balances : [{key,name,amount,asOf,status}]
+     *   history  : { key: [{dateKey, amount}] }
+     *   missing  : [names on the previous list with no entry in the newest]
+     *   rollForward : [per-customer differences for the newest sheet]
+     *   change   : { list, total }
+     *   borrowed : { list, total }
+     * }
+     */
+    function buildSnapshotView(sheets, manual) {
+        var P = global.WCParser;
+
+        var history = {};    // key -> [{dateKey, amount}]
+        var names = {};      // key -> display name
+        var latest = {};     // key -> {key,name,amount,dateKey}
+        var previous = {};   // key -> amount (snapshot before the latest one)
+        var lastSnapshotDate = null;
+        var previousSnapshotDate = null;
+
+        var change = [];
+        var borrowed = [];
+
+        sheets.forEach(function (sheet) {
+            var parsed = sheet.parsed || {};
+            var dateKey = sheet.startDateKey || sheet.id;
+            var snap = parsed.remainingSnapshot || [];
+
+            if (snap.length) {
+                previousSnapshotDate = lastSnapshotDate;
+                previous = {};
+                Object.keys(latest).forEach(function (k) { previous[k] = latest[k].amount; });
+
+                var seen = {};
+                var fresh = {};
+
+                snap.forEach(function (s) {
+                    if (s.key === '__unassigned__') return;
+                    names[s.key] = s.name;
+                    seen[s.key] = true;
+
+                    if (!history[s.key]) history[s.key] = [];
+                    history[s.key].push({ dateKey: dateKey, amount: s.amount });
+
+                    fresh[s.key] = { key: s.key, name: s.name, amount: s.amount, dateKey: dateKey };
+                });
+
+                latest = fresh;
+                lastSnapshotDate = dateKey;
+            }
+
+            (parsed.change && parsed.change.named ? parsed.change.named : []).forEach(function (c) {
+                if (c.key === '__unassigned__') return;
+                change.push({ key: c.key, name: c.name, amount: c.amount, dateKey: dateKey });
+            });
+
+            (parsed.borrowed || []).forEach(function (b) {
+                borrowed.push({
+                    key: P.customerKeyOf(b.name),
+                    name: b.name,
+                    gallons: b.gallons,
+                    dateKey: dateKey
+                });
+            });
+        });
+
+        // Lifetime given/paid per customer
+        var given = {};
+        var paid = {};
+        sheets.forEach(function (sheet) {
+            ((sheet.parsed || {}).ledger || []).forEach(function (e) {
+                names[e.key] = names[e.key] || e.name;
+                if (e.type === 'given') given[e.key] = (given[e.key] || 0) + e.amount;
+                else paid[e.key] = (paid[e.key] || 0) + e.amount;
+            });
+        });
+        (manual || []).forEach(function (m) {
+            names[m.customerKey] = names[m.customerKey] || m.customerName;
+            if (m.type === 'given') given[m.customerKey] = (given[m.customerKey] || 0) + m.amount;
+            else paid[m.customerKey] = (paid[m.customerKey] || 0) + m.amount;
+        });
+
+        var balances = Object.keys(latest).map(function (k) {
+            var row = latest[k];
+            return {
+                key: k,
+                name: names[k] || row.name,
+                amount: row.amount,
+                asOf: row.dateKey,
+                owed: P.round2(given[k] || 0),
+                paid: P.round2(paid[k] || 0),
+                status: 'current'
+            };
+        });
+
+        // People who were on an older list but are absent from the newest one
+        var missing = Object.keys(previous)
+            .filter(function (k) { return !latest[k]; })
+            .map(function (k) {
+                return { key: k, name: names[k] || k, amount: previous[k], asOf: previousSnapshotDate };
+            });
+
+        // Anyone who only ever appears in manual entries
+        Object.keys(given).concat(Object.keys(paid)).forEach(function (k) {
+            if (latest[k]) return;
+            var already = balances.some(function (b) { return b.key === k; });
+            if (already) return;
+            balances.push({
+                key: k, name: names[k] || k, amount: 0, asOf: null,
+                owed: P.round2(given[k] || 0), paid: P.round2(paid[k] || 0),
+                status: 'settled'
+            });
+        });
+
+        balances.sort(function (a, b) {
+            if (b.amount !== a.amount) return b.amount - a.amount;
+            return String(a.name).localeCompare(String(b.name));
+        });
+
+        // Roll-forward check on the newest sheet with a snapshot
+        var rollForward = [];
+        var newest = null;
+        sheets.forEach(function (s) {
+            if (((s.parsed || {}).remainingSnapshot || []).length) newest = s;
+        });
+
+        if (newest) {
+            var prevSheet = null;
+            sheets.forEach(function (s) {
+                if (s === newest) return;
+                if (String(s.startDateKey) >= String(newest.startDateKey)) return;
+                if (!((s.parsed || {}).remainingSnapshot || []).length) return;
+                if (!prevSheet || String(s.startDateKey) > String(prevSheet.startDateKey)) prevSheet = s;
+            });
+
+            if (prevSheet) {
+                var prevMap = {};
+                (prevSheet.parsed.remainingSnapshot || []).forEach(function (s) { prevMap[s.key] = s.amount; });
+
+                var nowMap = {};
+                (newest.parsed.remainingSnapshot || []).forEach(function (s) { nowMap[s.key] = s.amount; });
+
+                var gaveMap = {};
+                var paidMap = {};
+                ((newest.parsed || {}).ledger || []).forEach(function (e) {
+                    if (e.type === 'given') gaveMap[e.key] = (gaveMap[e.key] || 0) + e.amount;
+                    else paidMap[e.key] = (paidMap[e.key] || 0) + e.amount;
+                });
+
+                var allKeys = Object.keys(prevMap).concat(Object.keys(nowMap));
+                allKeys.forEach(function (k) {
+                    if (allKeys.indexOf(k) !== allKeys.lastIndexOf(k)) return;
+                    var before = prevMap[k] || 0;
+                    var after = nowMap[k] || 0;
+                    var expected = P.round2(before + (gaveMap[k] || 0) - (paidMap[k] || 0));
+                    var diff = P.round2(after - expected);
+                    if (Math.abs(diff) >= 0.5) {
+                        rollForward.push({
+                            key: k,
+                            name: names[k] || k,
+                            before: before,
+                            given: gaveMap[k] || 0,
+                            paid: paidMap[k] || 0,
+                            expected: expected,
+                            actual: after,
+                            diff: diff
+                        });
+                    }
+                });
+            }
+        }
+
+        // Merge borrowed gallons by name (newest count wins, they are a live count)
+        var borrowMap = {};
+        borrowed.forEach(function (b) { borrowMap[b.key] = b; });
+
+        return {
+            balances: balances,
+            history: history,
+            missing: missing,
+            rollForward: rollForward,
+            lastSnapshotDate: lastSnapshotDate,
+            change: {
+                list: change,
+                total: P.round2(change.reduce(function (a, c) { return a + c.amount; }, 0))
+            },
+            borrowed: {
+                list: Object.keys(borrowMap).map(function (k) { return borrowMap[k]; }),
+                total: P.round2(Object.keys(borrowMap).reduce(function (a, k) {
+                    return a + borrowMap[k].gallons;
+                }, 0))
+            }
+        };
+    }
+
+    function snapshotView() {
+        return Promise.all([getAllSheets(), listManual()]).then(function (res) {
+            return buildSnapshotView(res[0], res[1]);
+        });
+    }
+
+    function outstandingTotal() {
+        return snapshotView().then(function (view) {
+            return global.WCParser.round2(view.balances.reduce(function (a, b) {
+                return a + (b.amount > 0 ? b.amount : 0);
+            }, 0));
+        });
+    }
+
+    /* =========================================================
+       Export / import
+       ========================================================= */
+
+    function exportPayload(deviceLabel) {
+        return Promise.all([getAllSheets(), listManual(), listCustomers()])
+            .then(function (res) {
+                return {
+                    app: 'watercalc',
+                    schemaVersion: SCHEMA_VERSION,
+                    exportedAt: new Date().toISOString(),
+                    device: deviceLabel || 'unknown',
+                    sheets: res[0],
+                    manual: res[1],
+                    customers: res[2]
+                };
+            });
+    }
+
+    function validatePayload(payload) {
+        var problems = [];
+        if (!payload || typeof payload !== 'object') {
+            problems.push('File is not valid JSON.');
+            return problems;
+        }
+        if (payload.app !== 'watercalc') {
+            problems.push('This does not look like a Water Calculator backup.');
+            return problems;
+        }
+        if (payload.schemaVersion && payload.schemaVersion > SCHEMA_VERSION) {
+            problems.push('Backup was made by a newer version (v' + payload.schemaVersion + '). Update the app first.');
+        }
+        var hasSheets = Array.isArray(payload.sheets);
+        var hasDays = Array.isArray(payload.days);   // older backups
+        if (!hasSheets && !hasDays) problems.push('Backup has no sheets list.');
+        return problems;
+    }
+
+    /**
+     * Merges a backup in. Newer updatedAt wins; nothing is ever deleted.
+     * Also upgrades v1 backups (which stored days + credit events).
+     */
+    function importPayload(payload) {
+        var plan = { added: 0, updated: 0, skipped: 0, manualAdded: 0, manualUpdated: 0, upgraded: 0 };
+
+        var incoming = (payload.sheets || []).slice();
+
+        // Upgrade a v1 backup: turn days into sheets
+        if (!incoming.length && Array.isArray(payload.days)) {
+            payload.days.forEach(function (day) {
+                incoming.push({
+                    id: day.id,
+                    startDateKey: day.dateKey || day.id,
+                    endDateKey: day.dateKey || day.id,
+                    dateKeys: [day.dateKey || day.id],
+                    label: day.dateLabel || day.id,
+                    rawText: day.rawText || '',
+                    parsed: day.parsed || {},
+                    totals: day.totals || {},
+                    sourceDevice: day.sourceDevice,
+                    createdAt: day.createdAt,
+                    updatedAt: day.updatedAt
+                });
+                plan.upgraded++;
+            });
+        }
+
+        return Promise.all([getAllSheets(), listManual(), listCustomers()]).then(function (res) {
+            var local = {};
+            res[0].forEach(function (s) { local[s.id] = s; });
+
+            var localManual = {};
+            res[1].forEach(function (m) { localManual[m.id] = m; });
+
+            var localCustomers = {};
+            res[2].forEach(function (c) { localCustomers[c.key] = c; });
+
+            var ops = [];
+
+            incoming.forEach(function (s) {
+                if (!s || !s.id) return;
+                var existing = local[s.id];
+                if (!existing) {
+                    ops.push({ type: 'put', store: 'sheets', value: s });
+                    plan.added++;
+                    return;
+                }
+                var inT = Date.parse(s.updatedAt || 0) || 0;
+                var exT = Date.parse(existing.updatedAt || 0) || 0;
+                if (inT > exT) {
+                    ops.push({ type: 'put', store: 'sheets', value: s });
+                    plan.updated++;
+                } else {
+                    plan.skipped++;
+                }
+            });
+
+            (payload.manual || []).forEach(function (m) {
+                if (!m || !m.id) return;
+                var existing = localManual[m.id];
+                if (!existing) { ops.push({ type: 'put', store: 'manual', value: m }); plan.manualAdded++; }
+                else if ((Date.parse(m.updatedAt || 0) || 0) > (Date.parse(existing.updatedAt || 0) || 0)) {
+                    ops.push({ type: 'put', store: 'manual', value: m });
+                    plan.manualUpdated++;
+                }
+            });
+
+            (payload.customers || []).forEach(function (c) {
+                if (!c || !c.key || localCustomers[c.key]) return;
+                ops.push({ type: 'put', store: 'customers', value: c });
+            });
+
+            return E().batch(ops).then(function () {
+                return setMeta('lastImportAt', new Date().toISOString()).then(function () { return plan; });
+            });
+        });
+    }
+
+    function clearAll() { return E().clearAll(); }
+
+    /* =========================================================
+       Public API
+       ========================================================= */
+
+    global.WCStore = {
+        open: open,
+        engineName: engineName,
+        requestPersistence: requestPersistence,
+        estimate: estimate,
+
+        getMeta: getMeta,
+        setMeta: setMeta,
+
+        listSheets: listSheets,
+        getAllSheets: getAllSheets,
+        getSheet: getSheet,
+        saveSheet: saveSheet,
+        deleteSheet: deleteSheet,
+        combineSheets: combineSheets,
+        uncombineSheets: uncombineSheets,
+
+        listManual: listManual,
+        addManual: addManual,
+        deleteManual: deleteManual,
+        listCustomers: listCustomers,
+        registerCustomers: registerCustomers,
+
+        snapshotView: snapshotView,
+        buildSnapshotView: buildSnapshotView,
+        outstandingTotal: outstandingTotal,
+
+        exportPayload: exportPayload,
+        validatePayload: validatePayload,
+        importPayload: importPayload,
+        clearAll: clearAll,
+
+        SCHEMA_VERSION: SCHEMA_VERSION
+    };
+})(typeof window !== 'undefined' ? window : this);

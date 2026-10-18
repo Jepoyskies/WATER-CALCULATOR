@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Parser tests</title>
+    <style>
+        body { font-family: ui-monospace, Consolas, monospace; padding: 24px; background: #0f1419; color: #d5dbe0; font-size: 13px; }
+        h1 { font-size: 16px; color: #7cc4ff; }
+        h2 { font-size: 14px; color: #7cc4ff; margin-top: 26px; }
+        .pass { color: #4ade80; }
+        .fail { color: #f87171; font-weight: bold; }
+        li { padding: 3px 0; border-bottom: 1px solid #1e2630; list-style: none; }
+        ul { padding: 0; }
+        .summary { margin: 18px 0; padding: 12px; border-radius: 8px; background: #1a2129; font-size: 15px; }
+    </style>
+</head>
+<body>
+<h1>Water Calculator — parser tests (real delivery notes)</h1>
+<div class="summary" id="summary">running…</div>
+<ul id="results"></ul>
+
+<script src="../parser.js"></script>
+<script>
+(function () {
+    var P = window.WCParser;
+    var results = [];
+    var failures = [];
+    var group = '';
+
+    function check(name, actual, expected) {
+        var ok = JSON.stringify(actual) === JSON.stringify(expected);
+        results.push({ name: name, ok: ok });
+        if (!ok) failures.push(name + '\n   got:      ' + JSON.stringify(actual) +
+                                    '\n   expected: ' + JSON.stringify(expected));
+    }
+    function ok(name, condition, detail) {
+        results.push({ name: name, ok: !!condition });
+        if (!condition) failures.push(name + (detail ? '\n   ' + detail : ''));
+    }
+    function near(name, actual, expected) {
+        check(name, P.round2(actual), P.round2(expected));
+    }
+
+    /* ==========================================================
+       A. The real weekend sheet (Sep 12 + Sep 13)
+       ========================================================== */
+    var sheetA = [
+        'Expenses', '',
+        '100 load',
+        '150 angkas',
+        '200 gas (800+200 ecosport)',
+        '200 food', '',
+        'Credits Paid',
+        '200 ricky',
+        '75 nene', '',
+        'Credits today',
+        '125 oscar',
+        '75 perez', '',
+        'Remaining',
+        'Berto 50',
+        '540 mang tony',
+        '100 lito', '',
+        'September 12, 2026 (Saturday)',
+        '1st trip',
+        '35R',
+        '4 return',
+        '25x23',
+        '20x8', '',
+        'September 13, 2026 (Sunday)',
+        '1st trip',
+        '35R',
+        '2 return may laman',
+        '25x30',
+        '20x3', '',
+        '2nd trip',
+        '36R',
+        '1 return may laman',
+        '25x25',
+        '20x10', '',
+        '3rd trip',
+        '35R',
+        '4 return',
+        '25x26',
+        '20x5'
+    ].join('\n');
+
+    var a = P.parse(sheetA);
+
+    check('A: both dates found', a.dateKeys, ['2026-09-12', '2026-09-13']);
+    check('A: primary date is the first', a.dateKey, '2026-09-12');
+    check('A: round-trip weekday works', P.weekdayOf('2026-09-12'), 'Saturday');
+
+    check('A: expenses total', a.expenses.total, 650);
+    check('A: credits paid total', a.creditsPaid.total, 275);
+    check('A: credits today total', a.creditsToday.total, 200);
+
+    // The bug that mattered: "1st trip" must NEVER be counted as money
+    check('A: remaining total is 690 not 691', a.remaining.total, 690);
+    check('A: remaining keeps per-person balances', a.remainingSnapshot, [
+        { key: 'berto', name: 'Berto', amount: 50 },
+        { key: 'mang tony', name: 'Mang Tony', amount: 540 },
+        { key: 'lito', name: 'Lito', amount: 100 }
+    ]);
+
+    check('A: four trips found', a.trips.length, 4);
+    check('A: trip names use the label + loaded count',
+        a.trips.map(function (t) { return t.name; }),
+        ['1st trip 35R', '1st trip 35R', '2nd trip 36R', '3rd trip 35R']);
+
+    check('A: loaded gallons read from the R line',
+        a.trips.map(function (t) { return t.loaded; }), [35, 35, 36, 35]);
+    check('A: sold gallons per trip',
+        a.trips.map(function (t) { return t.sold; }), [31, 33, 35, 31]);
+    check('A: returns per trip',
+        a.trips.map(function (t) { return t.returnedGallons; }), [4, 2, 1, 4]);
+    check('A: "may laman" tracked separately',
+        a.trips.map(function (t) { return t.fullReturns; }), [0, 2, 1, 0]);
+
+    check('A: revenue ignores returns (money comes from PxQ only)',
+        a.trips.map(function (t) { return t.revenue; }), [735, 810, 825, 750]);
+    check('A: total revenue', a.totals.totalRevenue, 3120);
+    check('A: total gallons sold', a.totals.totalGallons, 130);
+
+    ok('A: every trip balances loaded = sold + returns',
+        a.trips.every(function (t) { return t.diff === 0; }),
+        JSON.stringify(a.trips.map(function (t) { return t.diff; })));
+    check('A: no warnings', a.warnings.length, 0);
+
+    check('A: trips grouped under the right dates',
+        a.days.map(function (d) { return d.dateKey + ':' + d.trips.length; }),
+        ['2026-09-12:1', '2026-09-13:3']);
+
+    check('A: nothing left unparsed', a.unparsed, []);
+    check('A: utang events for the ledger',
+        a.ledger.map(function (l) { return l.type + ' ' + l.key + ' ' + l.amount; }),
+        ['paid ricky 200', 'paid nene 75', 'given oscar 125', 'given perez 75']);
+
+    /* ==========================================================
+       B. A sheet with bahay, stated totals and a written total
+       ========================================================== */
+    var sheetB = [
+        'Expenses -450',
+        '125 pizza',
+        '100 mom load',
+        '240 water district',
+        '100 load',
+        '200 food',
+        '150 pamasahe', '',
+        'Credits Today - 150',
+        '75 oscar',
+        '75 lito', '',
+        'Credits Paid - 225',
+        '150 danny',
+        '75 bobby', '',
+        'Remaining',
+        '50 ricky',
+        'Berto 50',
+        '540 mang tony',
+        '200 oscar', '',
+        'September 26, 2026 (Saturday)',
+        '35R 1st trip',
+        '25x26',
+        '20x9', '',
+        'September 27, 2026 (Sunday)',
+        '40R 1st trip',
+        '6 bahay',
+        '1 return may laman',
+        '25x24',
+        '20x9', '',
+        '35R 2nd trip',
+        '2 return',
+        '25x25',
+        '20x8', '',
+        '25R 3rd trip',
+        '12 return',
+        '25x13', '',
+        '2145 total'
+    ].join('\n');
+
+    var b = P.parse(sheetB);
+
+    check('B: expenses item count', b.expenses.items.length, 6);
+    check('B: expenses computed from lines', b.expenses.total, 915);
+    check('B: written expense total captured', b.expenses.statedTotal, 450);
+    check('B: credits today stated total captured', b.creditsToday.statedTotal, 150);
+    check('B: credits today matches its lines', b.creditsToday.total, 150);
+    check('B: credits paid stated total captured', b.creditsPaid.statedTotal, 225);
+    check('B: credits paid matches its lines', b.creditsPaid.total, 225);
+
+    check('B: remaining has four people', b.remainingSnapshot.length, 4);
+    check('B: remaining total', b.remaining.total, 840);
+    check('B: written sheet total captured', b.writtenTotal, 2145);
+
+    check('B: bahay counted', b.trips[1].bahay, 6);
+    check('B: bahay trip still balances', b.trips[1].diff, 0);
+    check('B: trip with bahay sold', b.trips[1].sold, 33);
+    ok('B: loaded = sold + returns + bahay for every trip',
+        b.trips.every(function (t) { return t.diff === 0; }),
+        JSON.stringify(b.trips.map(function (t) { return [t.name, t.loaded, t.sold, t.returnedGallons, t.bahay, t.diff]; })));
+    check('B: total revenue', b.totals.totalRevenue, 2720);
+    check('B: total bahay gallons', b.totals.bahayGallons, 6);
+
+    /* ==========================================================
+       C. Change owed + borrowed gallons
+       ========================================================== */
+    var sheetC = [
+        'Customers with change',
+        '20 aling mary', '',
+        'Customers that borrowed gallons from me',
+        '1 borrow tindahan sa kanto',
+        '3 ricky borrow',
+        '1 borrow highway',
+        ' 3 borrow likod simbahan'
+    ].join('\n');
+
+    var c = P.parse(sheetC);
+    check('C: one change entry', c.change.named.length, 1);
+    check('C: change name and amount', [c.change.named[0].name, c.change.named[0].amount], ['Aling Mary', 20]);
+    check('C: change total', c.change.total, 20);
+    check('C: four borrowed entries', c.borrowed.length, 4);
+    check('C: borrowed gallons parsed', c.borrowed.map(function (x) { return x.gallons; }), [1, 3, 1, 3]);
+    check('C: borrowed names cleaned', c.borrowed.map(function (x) { return x.name; }),
+        ['Tindahan Sa Kanto', 'Ricky', 'Highway', 'Likod Simbahan']);
+    check('C: things borrowed are never money', c.totals.totalRevenue, 0);
+    check('C: change is not counted as revenue', c.totals.totalRevenue, 0);
+
+    /* ==========================================================
+       D. Loaded-count mismatch is reported, not hidden
+       ========================================================== */
+    var off = P.parse(['Sept 1, 2026', '47R', '1 return', '25x40', '20x7'].join('\n'));
+    check('D: imbalance detected', off.trips[0].diff, 1);
+    ok('D: a warning explains it', off.warnings.length === 1 &&
+        /loaded 47R/.test(off.warnings[0].text), JSON.stringify(off.warnings));
+
+    /* ==========================================================
+       E. Dates
+       ========================================================== */
+    var y = new Date().getFullYear();
+    check('E: month name + weekday', P.extractDate('September 12, 2026 (Saturday)'), '2026-09-12');
+    check('E: short month with weekday', P.extractDate('Oct 17'), y + '-10-17');
+    check('E: weekday without brackets', P.extractDate('Oct 18 Sunday'), y + '-10-18');
+    check('E: ISO', P.extractDate('2026-10-18'), '2026-10-18');
+    check('E: slash format', P.extractDate('10/18/2026'), '2026-10-18');
+    check('E: impossible date rejected', P.extractDate('Feb 30'), null);
+    check('E: price line is not a date', P.extractDate('25x34'), null);
+    check('E: loaded line is not a date', P.extractDate('35R'), null);
+    check('E: returned line is not a date', P.extractDate('4 return'), null);
+
+    /* ==========================================================
+       F. Sections
+       ========================================================== */
+    check('F: expenses', P.detectSection('Expenses -450').key, 'expenses');
+    check('F: gastos', P.detectSection('Gastos').key, 'expenses');
+    check('F: credits today', P.detectSection('Credits today').key, 'creditsToday');
+    check('F: credits today with total', P.detectSection('Credits Today - 150').key, 'creditsToday');
+    check('F: credits paid', P.detectSection('Credits Paid').key, 'creditsPaid');
+    check('F: remaining', P.detectSection('Remaining').key, 'remaining');
+    check('F: borrowed beats remaining', P.detectSection('Customers that borrowed gallons from me').key, 'borrowed');
+    check('F: change', P.detectSection('Customers with change').key, 'change');
+
+    /* ==========================================================
+       G. Line parsing
+       ========================================================== */
+    var g1 = P.parseLedgerLine('540 mang tony', true);
+    check('G: amount-then-name', [g1.amount, g1.name], [540, 'Mang Tony']);
+    var g2 = P.parseLedgerLine('Berto 50', true);
+    check('G: name-then-amount', [g2.amount, g2.name], [50, 'Berto']);
+    var g3 = P.parseLedgerLine('50 tito marvin = 225', true);
+    check('G: value after = wins', [g3.amount, g3.name], [225, 'Tito Marvin']);
+    var g4 = P.parseLedgerLine('300', true);
+    check('G: bare amount has no name', [g4.amount, g4.name], [300, null]);
+    var g5 = P.parseLedgerLine('100 load', false);
+    check('G: expenses never get a name', [g5.amount, g5.name], [100, null]);
+    var g6 = P.parseBorrowLine('3 ricky borrow');
+    check('G: borrow with trailing word', [g6.gallons, g6.name], [3, 'Ricky']);
+
+    /* ==========================================================
+       H. Formatting
+       ========================================================== */
+    check('H: negative sign in front', P.formatPHP(-1245), '-\u20B11,245');
+    check('H: positive', P.formatPHP(1245), '\u20B11,245');
+    check('H: zero', P.formatPHP(0), '\u20B10');
+
+    /* ==========================================================
+       I. Backwards compatible with the simple format
+       ========================================================== */
+    var simple = P.parse(['Oct 18', 'Expenses', '100 breakfast', '200 gas',
+                          '35R', '25x34', '1 return',
+                          'Credits Today', '50 tito marvin = 225',
+                          'Credits Paid', '300',
+                          'Remaining', '120'].join('\n'));
+    check('I: simple sheet expenses', simple.expenses.total, 300);
+    check('I: simple sheet revenue', simple.totals.totalRevenue, 850);
+    check('I: simple sheet remaining', simple.remaining.total, 120);
+    check('I: simple sheet balances', simple.trips[0].diff, 0);
+    check('I: simple sheet net cash flow', simple.totals.netCashFlow, 850 + 300 - 300 - 225);
+
+    /* ==========================================================
+       J. Carry-over template
+       ========================================================== */
+    var tpl = P.buildNewDayTemplate({
+        dateKey: '2026-10-18',
+        customers: [{ name: 'Berto', amount: 50 }, { name: 'Mang Tony', amount: 540 }]
+    });
+    ok('J: template is dated with weekday', /^Oct 18, 2026 \(Sunday\)/.test(tpl), JSON.stringify(tpl));
+    ok('J: template lists outstanding utang', /50 Berto/.test(tpl) && /540 Mang Tony/.test(tpl), tpl);
+    var rt = P.parse(tpl);
+    check('J: template re-parses to the same balances', rt.remaining.total, 590);
+    check('J: template balances to its people', rt.remainingSnapshot.length, 2);
+
+    /* ==========================================================
+       render
+       ========================================================== */
+    var passCount = results.filter(function (x) { return x.ok; }).length;
+    var failCount = results.length - passCount;
+
+    document.getElementById('summary').innerHTML =
+        '<span class="' + (failCount ? 'fail' : 'pass') + '">' +
+        passCount + ' passed, ' + failCount + ' failed</span> out of ' + results.length + ' checks' +
+        (failCount ? '<br><br><pre>' + failures.join('\n\n') + '</pre>' : '');
+
+    document.getElementById('results').innerHTML = results.map(function (x) {
+        return '<li class="' + (x.ok ? 'pass' : 'fail') + '">' + (x.ok ? '\u2713' : '\u2717') + ' ' + x.name + '</li>';
+    }).join('');
+
+    window.__TEST_SUMMARY__ = { pass: passCount, fail: failCount, total: results.length };
+    window.__TEST_FAILURES__ = failures;
+})();
+</script>
+</body>
+</html>
